@@ -78,7 +78,7 @@ section .rodata
     ; dd    define doubleword -> 32 bits
     ; dq    define quadword   -> 64 bits
 
-    message db "Hello, from Orion!", 10
+    message db "Hello, from the Orion kernel!", 10
     length equ $ - message
 
 section .text
@@ -107,7 +107,7 @@ sys_get_center_of_screen:
 
     ret
 
-sys_print_ASCII_character_green:
+sys_print_ASCII_string_green:
     ; this subroutine will work on a loop, as follows
     ;
     ; for each character in the string:
@@ -151,6 +151,9 @@ sys_print_ASCII_character_green:
     ; now how do I access the first row of the glyph?
     ; okay first I have to find out, "what glyph"?
     ; that can be done by finding the ASCII code of each letter as we proceed through the string
+    mov r14, 0 ; middle loop counter
+    ; reset to zero for each glyph
+    mov [loop_middle_print_ASCII_character_green_counter], r14
     cmp r13, r8
     jge .done_loop_outer_print_ASCII_character_green
     movzx r9, byte [rbp]
@@ -164,12 +167,21 @@ sys_print_ASCII_character_green:
     inc r13
     mov [loop_outer_print_ASCII_character_green_counter], r13 ; save counter value to memory
     lea rbp, [message + r13] ; load the next character's address onto rbp
+
+    ; increment [pen_x] by 8 to to get the next x coordinate for the next character
+    mov rax, [pen_x]
+    add rax, 8
+    mov [pen_x], rax
+
     jmp .loop_outer_print_ASCII_character_green
 
 .loop_middle_print_ASCII_character_green:
     ; now that we have the first glyph row, we need to load it's byte
     ; we will load this byte into r10
     ; but how do I access this byte here?
+    mov r15, 0 ; inner loop counter
+    ; reset to zero for each byte within the glyph
+    mov [loop_inner_print_ASCII_character_green_counter], r15
     cmp r14, 8
     jge .done_loop_middle_print_ASCII_character_green
     ; this is how I will access the byte of the glyph
@@ -366,6 +378,6 @@ _start:
     call sys_query_limine_bootloader_info
     call sys_query_framebuffer
     call sys_get_center_of_screen
-    call sys_print_ASCII_character_green
+    call sys_print_ASCII_string_green
 
     jmp sys_exit
