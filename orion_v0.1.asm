@@ -78,12 +78,32 @@ section .rodata
     ; dd    define doubleword -> 32 bits
     ; dq    define quadword   -> 64 bits
 
-    message db "Hello, from the Orion kernel!", 10
-    length equ $ - message
+    orion_hello_message db "Hello, from the Orion kernel!", 10
+    length equ $ - orion_hello_message
+
+    syscall_table:
+        dq sys_query_limine_bootloader_info ; syscall 0
+        dq sys_query_limine_framebuffer     ; syscall 1
+        dq sys_get_center_of_screen         ; syscall 2
+        dq sys_print_ASCII_string_green     ; syscall 3
+
+    syscall_table_end:
+        %define SYSCALL_COUNT ((syscall_table_end - syscall_table) / 8)
 
 section .text
-
     global _start
+
+syscall_dispatch:
+    cmp rax, SYSCALL_COUNT
+    jae .invalid_syscall
+
+    imul rax, rax, 8
+    mov rax, [syscall_table + rax]
+
+    jmp rax
+
+.invalid_syscall:
+    jmp sys_exit
 
 sys_get_center_of_screen:
     ; computing pen_x and pen_y as such to display the message on the center of the screen
@@ -136,7 +156,7 @@ sys_print_ASCII_string_green:
     ; 7 registers being used here then.
     ; actual work starts here
     ; character pointer
-    mov rbp, message ; currently at [message+0]
+    mov rbp, orion_hello_message ; currently at [message+0]
     mov r8, length
     mov r13, 0 ; outer loop counter
     mov r14, 0 ; middle loop counter
@@ -166,7 +186,7 @@ sys_print_ASCII_string_green:
     mov r13, [loop_outer_print_ASCII_character_green_counter] ; read counter value from memory
     inc r13
     mov [loop_outer_print_ASCII_character_green_counter], r13 ; save counter value to memory
-    lea rbp, [message + r13] ; load the next character's address onto rbp
+    lea rbp, [orion_hello_message + r13] ; load the next character's address onto rbp
 
     ; increment [pen_x] by 8 to to get the next x coordinate for the next character
     mov rax, [pen_x]
@@ -287,7 +307,7 @@ plot_pixel:
 
     ret
 
-sys_query_framebuffer:
+sys_query_limine_framebuffer:
     ; now I am free to use the registers from rbx through rdx
     ; do I need to preserve rax as well, since I have effectively extracted what I need from the bootloader response?
     ; answer: nope, don't need that pointer anymore.
@@ -375,9 +395,7 @@ _start:
 
     ; Orion's systemcalls
 
-    call sys_query_limine_bootloader_info
-    call sys_query_framebuffer
-    call sys_get_center_of_screen
-    call sys_print_ASCII_string_green
+    mov rax, 0
+    call syscall_dispatch
 
     jmp sys_exit
