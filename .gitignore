@@ -7,3 +7,4 @@ Orion — Minimal x86-64 Assembly Bootstrap Checklist.md
 *.elf
 *.iso
 *.o
+*.gdb
