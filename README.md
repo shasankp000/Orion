@@ -25,4 +25,4 @@ RSP = stack // Provided by Limine, stays as is.
 The kernel has currently 4 syscalls. As of the moment a syscall table has been built into `.rodata` and a first test pass works
 for calling `syscall #0`
 
-The R8 register as of this moment is not being used to implement the permission system but the next commit will have it done.
+The R8 register as of this moment is not being used to implement the permission system but the ~next commit will have it done~, actually no, this will take quite some time for me to get done.
