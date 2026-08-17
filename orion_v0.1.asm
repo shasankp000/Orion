@@ -79,13 +79,15 @@ section .rodata
     ; dq    define quadword   -> 64 bits
 
     orion_hello_message db "Hello, from the Orion kernel!", 10
-    length equ $ - orion_hello_message
+    orion_hello_message_length equ $ - orion_hello_message
 
     syscall_table:
         dq sys_query_limine_bootloader_info ; syscall 0
         dq sys_query_limine_framebuffer     ; syscall 1
         dq sys_get_center_of_screen         ; syscall 2
-        dq sys_print_ASCII_string_green     ; syscall 3
+        dq sys_plot_pixel                   ; syscall 3
+        dq sys_print_ASCII_string_green     ; syscall 4
+        dq sys_exit                         ; syscall 5
 
     syscall_table_end:
         %define SYSCALL_COUNT ((syscall_table_end - syscall_table) / 8)
@@ -106,28 +108,35 @@ syscall_dispatch:
     jmp sys_exit
 
 sys_get_center_of_screen:
+    ; rbx = length of input text
+    ; rcx = (width - (length * 8)) / 2
+    ; rdx = (height - 8) / 2 --> although redundant storing in rdx
+    ; rsi = temporary move register
     ; computing pen_x and pen_y as such to display the message on the center of the screen
     ; compute pen_x : (width - (length * 8)) / 2
 
-    mov rax, length
-    mov rbx, [framebuffer_struct_width]
-    imul rax, rax, 8 ; length * 8
-    sub rbx, rax ; (width - (length * 8))
-    shr rbx, 1 ; (width - (length * 8)) / 2
+    mov rsi, [framebuffer_struct_width]
+    imul rbx, rbx, 8 ; length * 8
+    sub rsi, rbx ; (width - (length * 8))
+    shr rsi, 1 ; (width - (length * 8)) / 2
+    mov rcx, rsi ; rcx = (width - (length * 8)) / 2
 
-    mov [pen_x], rbx
+    mov [pen_x], rcx
 
     ; compute pen_y : (height - 8) / 2
 
-    mov rax, [framebuffer_struct_height]
-    sub rax, 8 ; (height - 8)
-    shr rax, 1 ; (height - 8) / 2
+    mov rsi, [framebuffer_struct_height]
+    sub rsi, 8 ; (height - 8)
+    shr rsi, 1 ; (height - 8) / 2
 
-    mov [pen_y], rax
+    mov [pen_y], rsi ; I did not do mov rdx, rsi, since that's just wasteful
 
     ret
 
 sys_print_ASCII_string_green:
+    ; sys_print_ASCII_string_green(char *buffer, int length, int x, int y)
+
+    ; following documentation is pre-establishment of syscall ABI
     ; this subroutine will work on a loop, as follows
     ;
     ; for each character in the string:
@@ -156,8 +165,18 @@ sys_print_ASCII_string_green:
     ; 7 registers being used here then.
     ; actual work starts here
     ; character pointer
-    mov rbp, orion_hello_message ; currently at [message+0]
-    mov r8, length
+
+
+    ; calling convention
+    ; rbx = buffer pointer
+    ; rcx = length
+    ; rdx = x
+    ; rdi = y
+
+    mov rbp, rbx ; currently at [message+0]
+    mov r8, rcx
+    mov [pen_x], rdx
+    mov [pen_y], rdi
     mov r13, 0 ; outer loop counter
     mov r14, 0 ; middle loop counter
     mov r15, 0 ; inner loop counter
@@ -186,12 +205,16 @@ sys_print_ASCII_string_green:
     mov r13, [loop_outer_print_ASCII_character_green_counter] ; read counter value from memory
     inc r13
     mov [loop_outer_print_ASCII_character_green_counter], r13 ; save counter value to memory
-    lea rbp, [orion_hello_message + r13] ; load the next character's address onto rbp
+    inc rbp ; instead of calculating the effective address of the next character, we just increment the pointer by 1
+    ; this is analogous to :
+    ; char *buf = some buffer
+    ; char next_char = buf+1;
+
 
     ; increment [pen_x] by 8 to to get the next x coordinate for the next character
-    mov rax, [pen_x]
-    add rax, 8
-    mov [pen_x], rax
+    mov rdx, [pen_x]
+    add rdx, 8
+    mov [pen_x], rdx
 
     jmp .loop_outer_print_ASCII_character_green
 
@@ -228,12 +251,12 @@ sys_print_ASCII_string_green:
     ; now call plot_pixel
     ; plot_pixel(pen_x + col, pen_y + row)
     ; r14 and r15 are uncompromised, only r13 is being mutated multiple times.
-    mov rdi, [pen_x]
-    add rdi, r15 ; rdi = pen_x + column (our x)
-    mov rsi, [pen_y]
-    add rsi, r14 ; rsi = pen_y + row (our y)
+    mov rcx, [pen_x]
+    add rcx, r15 ; rdi = pen_x + column (our x)
+    mov rdx, [pen_y]
+    add rdx, r14 ; rsi = pen_y + row (our y)
     ; plot_pixel's reserved registers will be safe to use now.
-    call plot_pixel
+    call sys_plot_pixel
 
     inc r15
     mov [loop_inner_print_ASCII_character_green_counter], r15
@@ -251,22 +274,25 @@ sys_print_ASCII_string_green:
 .done_loop_inner_print_ASCII_character_green:
     ret
 
-plot_pixel:
-    ; Clobbers: rax, rbx, rcx, rdx, so callers must save these registers beforehand.
+sys_plot_pixel:
+    ; This should be a protected syscall later.
+
+    ; Clobbers: rbx, rcx, rdx, and rsi so callers must save these registers beforehand.
     ; method to plot a pixel given the x and y coordinates.
     ; the pixel plotting math is as follows.
     ; we find out the pixel address via:
     ; offset = (y * pitch) + (x * bytes_per_pixel)
     ; pixel_address = framebuffer_struct_address + offset
     ; so, for this, let our calling convention be
-    ; rax = offset (and later to be used as the pixel address when we add the framebuffer_struct_address)
-    ; rdi = x
-    ; rsi = y
-    ; rcx = (temporary move register)
+    ; rbx = offset (and later to be used as the pixel address when we add the framebuffer_struct_address)
+    ; rcx = x, then (x * bytes_per_pixel)
+    ; rdx = y, then (y * pitch)
+    ; rsi = (temporary move register)
     ; the mul operation uses rax register implicitly to store result of multiplications
+    ; but since rax has been reserved we need to use imul instead
     ; so we do this:
-    mov rax, [framebuffer_struct_pitch]
-    mul rsi ; (reads y), the value of (y * pitch) is saved to the rax register
+    mov rsi, [framebuffer_struct_pitch]
+    imul rdx, rsi ; (reads y), the value of (y * pitch) is saved to the rcx register
 
     ; now we need to find bytes_per_pixel.
     ; but out bpp is "bits" per pixel not bytes
@@ -276,14 +302,15 @@ plot_pixel:
     ; a faster and cheaper alternative to using div is just shr (shift right)
     ; shr will shift the bits to the right, each shift is a divison by 2.
     ; since our bpp value will never be odd, so we can safely use shr
-    movzx rbx, word [framebuffer_struct_bpp] ; using movzx again since the bpp value is just 2 bytes and our rbx register is not.
-    shr rbx, 3 ; shift right 3 times, divide by 8, rbx now becomes bytes_per_pixel
-    imul rdi, rbx ; (x * bytes_per_pixel)
+    movzx rsi, word [framebuffer_struct_bpp] ; using movzx again since the bpp value is just 2 bytes and our rbx register is not.
+    shr rsi, 3 ; shift right 3 times, divide by 8, rbx now becomes bytes_per_pixel
+    imul rcx, rsi ; (x * bytes_per_pixel)
     ; used imul here because it takes two operands,
 
-    add rax, rdi ; (y * pitch) + (x * bytes_per_pixel)
-    mov rcx, [framebuffer_struct_address] ; framebuffer_struct_address
-    add rax, rcx ; final pixel address
+    add rcx, rdx ; offset = (y * pitch) + (x * bytes_per_pixel)
+    mov rbx, rcx ; rbx = offset, at this point, rcx and rdx are free
+    mov rsi, [framebuffer_struct_address] ; framebuffer_struct_address
+    add rbx, rsi ; final pixel address
 
     ; now colouring our pixel in green.
     ; here is how a 32-bit pixel value is split across color channels
@@ -295,11 +322,13 @@ plot_pixel:
     ; shifting 0xFF left by 8 to give us 0x0000FF00, and this is useful since shl is used to position a value
     ; between a specific range
 
+    ; shift 0xFF by the low byte of the green mask shift of the framebuffer
     mov rcx, [framebuffer_struct_green_mask_shift]
     mov rdx, 0xFF
     shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
 
-    mov [rax], edx ; move the 4-byte color value to a 32-bit register? What is edx doing here?
+
+    mov [rbx], edx ; move the 4-byte color value to a 32-bit register? What is edx doing here?
     ; okay so since our pixel color value was built in a 64-bit register
     ; but the pixel on a 32bpp framebuffer only occupies 4 bytes in memory, so
     ; if we did mov [rax], rdx, we would over-write all 8 bytes into memory at the starting pixel address
@@ -314,45 +343,50 @@ sys_query_limine_framebuffer:
 
     ; so I can do this then?
     ; yep!
-    mov rax, [frambuffer_request + 40] ; response field
-    test rax, rax
+
+    ; Orion syscall ABI, registers from rbx onwards will either take arguments
+    ; or handle stuff internally.
+    ; rax is ONLY for taking in syscall numbers
+
+    mov rbx, [frambuffer_request + 40] ; response field
+    test rbx, rbx
     jz no_response
-    mov rbx, [rax+0] ; revision
-    mov rcx, [rax+8] ; number of framebuffers
-    mov rdx, [rax+16] ; array of framebuffers
+    mov rcx, [rbx+0] ; revision
+    mov rdx, [rbx+8] ; number of framebuffers
+    mov rsi, [rbx+16] ; array of framebuffers
 
-    mov [framebuffer_revision], rbx
-    mov [framebuffer_count], rcx
+    mov [framebuffer_revision], rcx
+    mov [framebuffer_count], rdx
 
-    ; the framebuffer's struct address is at rdx ([rdx + 0])
-    mov rbx, [rdx+0] ; move the actual struct to rbx
+    ; the framebuffer's struct address is at rsi ([rsi + 0])
+    mov rbx, [rsi+0] ; move the actual struct to rbx
     ; now I can use an intermediate register + pointer hopping to get all the data I need
 
-    mov rax, [rbx+0] ; address
-    mov [framebuffer_struct_address], rax
+    mov rcx, [rbx+0] ; address
+    mov [framebuffer_struct_address], rcx
 
-    mov rax, [rbx+8] ; width
-    mov [framebuffer_struct_width], rax
+    mov rcx, [rbx+8] ; width
+    mov [framebuffer_struct_width], rcx
 
-    mov rax, [rbx+16] ; height
-    mov [framebuffer_struct_height], rax
+    mov rcx, [rbx+16] ; height
+    mov [framebuffer_struct_height], rcx
 
-    mov rax, [rbx+24] ; pitch
-    mov [framebuffer_struct_pitch], rax
+    mov rcx, [rbx+24] ; pitch
+    mov [framebuffer_struct_pitch], rcx
 
-    movzx rax, word [rbx+32] ; bpp
+    movzx rcx, word [rbx+32] ; bpp
     ; movzx is move with zero extend, fills out unnecessary bits with 0 instead of being stored as garabge values when moving a smaller value to a larger register
     ; it also needs a size operand since unlike plain mov, NASM cannot infer the source width from context, so it needs to know
     ; exactly how many bytes to zero extend from.
-    ; word is 2 bytes
-    mov [framebuffer_struct_bpp], ax ; ax holds exactly 2 bytes, not using rax here since we would then be writing extra garbage
+    ; word is 2 bytes (16-bits)
+    mov [framebuffer_struct_bpp], cx ; cx holds exactly 2 bytes, not using rax here since we would then be writing extra garbage
 
-    movzx rax, byte [rbx+37] ; green_mask_size
-    ; byte, is well, 1 byte.
-    mov [framebuffer_struct_green_mask_size], al ; al holds exactly 1 byte
+    movzx rcx, byte [rbx+37] ; green_mask_size
+    ; byte, is well, 1 byte (8-bits).
+    mov [framebuffer_struct_green_mask_size], cl ; cl holds exactly 1 byte
 
-    movzx rax, byte [rbx+38] ; green_mask_shift
-    mov [framebuffer_struct_green_mask_shift], al
+    movzx rcx, byte [rbx+38] ; green_mask_shift
+    mov [framebuffer_struct_green_mask_shift], cl
 
     ret
 
@@ -392,10 +426,29 @@ no_response:
     jmp sys_exit
 
 _start:
-
     ; Orion's systemcalls
 
+    ; query bootloader info
     mov rax, 0
     call syscall_dispatch
 
-    jmp sys_exit
+    ; query the framebuffer
+    mov rax, 1
+    call syscall_dispatch
+
+    ; compute the coordinates of the center of the screen
+    mov rax, 2
+    mov rbx, orion_hello_message_length
+    call syscall_dispatch
+
+    ; print the hello message on the screen
+    mov rax, 4
+    mov rbx, orion_hello_message
+    mov rcx, orion_hello_message_length
+    mov rdx, [pen_x] ; computed from syscall 2
+    mov rdi, [pen_y] ; computed from syscall 2
+    call syscall_dispatch
+
+    ; sys_exit
+    mov rax, 5
+    call syscall_dispatch
