@@ -60,8 +60,12 @@ section .bss
     framebuffer_struct_width resb 8;
     framebuffer_struct_pitch resb 8;
     framebuffer_struct_bpp resb 2 ; two bytes
+    framebuffer_struct_red_mask_size resb 1 ; 1 byte only
+    framebuffer_struct_red_mask_shift resb 1 ; 1 byte only
     framebuffer_struct_green_mask_size resb 1 ; 1 byte only
     framebuffer_struct_green_mask_shift resb 1 ; 1 byte only
+    framebuffer_struct_blue_mask_size resb 1 ; 1 byte only
+    framebuffer_struct_blue_mask_shift resb 1 ; 1 byte only
 
     loop_inner_print_ASCII_character_green_counter resb 8
     loop_middle_print_ASCII_character_green_counter resb 8
@@ -85,8 +89,8 @@ section .rodata
         dq sys_query_limine_bootloader_info ; syscall 0
         dq sys_query_limine_framebuffer     ; syscall 1
         dq sys_get_center_of_screen         ; syscall 2
-        dq sys_plot_pixel_green             ; syscall 3
-        dq sys_print_ASCII_string_green     ; syscall 4
+        dq sys_plot_pixel                   ; syscall 3
+        dq sys_print_ASCII_string           ; syscall 4
         dq sys_exit                         ; syscall 5
 
     syscall_table_end:
@@ -133,7 +137,7 @@ sys_get_center_of_screen:
 
     ret
 
-sys_print_ASCII_string_green:
+sys_print_ASCII_string:
     ; sys_print_ASCII_string_green(char *buffer, int length, int x, int y)
 
     ; following documentation is pre-establishment of syscall ABI
@@ -172,6 +176,7 @@ sys_print_ASCII_string_green:
     ; rcx = length
     ; rdx = x
     ; rdi = y
+    ; rsi = 0/1/2/3 (red, green, blue, white), color mode
 
     mov rbp, rbx ; currently at [message+0]
     mov r8, rcx
@@ -256,7 +261,7 @@ sys_print_ASCII_string_green:
     mov rdx, [pen_y]
     add rdx, r14 ; rsi = pen_y + row (our y)
     ; plot_pixel's reserved registers will be safe to use now.
-    call sys_plot_pixel_green
+    call sys_plot_pixel
 
     inc r15
     mov [loop_inner_print_ASCII_character_green_counter], r15
@@ -274,7 +279,7 @@ sys_print_ASCII_string_green:
 .done_loop_inner_print_ASCII_character_green:
     ret
 
-sys_plot_pixel_green:
+sys_plot_pixel:
     ; This should be a protected syscall later.
     ; This syscall plots pixels with the green color on them.
 
@@ -288,12 +293,13 @@ sys_plot_pixel_green:
     ; rbx = offset (and later to be used as the pixel address when we add the framebuffer_struct_address)
     ; rcx = x, then (x * bytes_per_pixel)
     ; rdx = y, then (y * pitch)
-    ; rsi = (temporary move register)
+    ; rsi = color mode; 0 for red, 1 for green, 2 for blue, 3, for default, white, will be passed down from printer subroutine or can be set during direct syscall
+    ; rdi = (temporary move register) (not called)
     ; the mul operation uses rax register implicitly to store result of multiplications
-    ; but since rax has been reserved we need to use imul instead
-    ; so we do this:
-    mov rsi, [framebuffer_struct_pitch]
-    imul rdx, rsi ; (reads y), the value of (y * pitch) is saved to the rcx register
+    ; but since rax has been reserved for syscall number (although rax becomes free once the syscall has been dispatched)
+    ; we will use imul.
+    mov rdi, [framebuffer_struct_pitch]
+    imul rdx, rdi ; (reads y), the value of (y * pitch) is saved to the rcx register
 
     ; now we need to find bytes_per_pixel.
     ; but out bpp is "bits" per pixel not bytes
@@ -303,17 +309,19 @@ sys_plot_pixel_green:
     ; a faster and cheaper alternative to using div is just shr (shift right)
     ; shr will shift the bits to the right, each shift is a divison by 2.
     ; since our bpp value will never be odd, so we can safely use shr
-    movzx rsi, word [framebuffer_struct_bpp] ; using movzx again since the bpp value is just 2 bytes and our rbx register is not.
-    shr rsi, 3 ; shift right 3 times, divide by 8, rbx now becomes bytes_per_pixel
-    imul rcx, rsi ; (x * bytes_per_pixel)
+    movzx rdi, word [framebuffer_struct_bpp] ; using movzx again since the bpp value is just 2 bytes and our rbx register is not.
+    shr rdi, 3 ; shift right 3 times, divide by 8, rbx now becomes bytes_per_pixel
+    imul rcx, rdi ; (x * bytes_per_pixel)
     ; used imul here because it takes two operands,
 
     add rcx, rdx ; offset = (y * pitch) + (x * bytes_per_pixel)
     mov rbx, rcx ; rbx = offset, at this point, rcx and rdx are free
-    mov rsi, [framebuffer_struct_address] ; framebuffer_struct_address
-    add rbx, rsi ; final pixel address
+    mov rdi, [framebuffer_struct_address] ; framebuffer_struct_address
+    add rbx, rdi ; final pixel address
 
-    ; now colouring our pixel in green.
+    ; rcx and rdx are free beyond this point
+
+    ; now colouring our pixel in red/green/blue.
     ; here is how a 32-bit pixel value is split across color channels
     ; bit: 31......24 23......16 15......8 7......0
     ;      [ unused ] [  red   ] [ green ] [ blue ] <-- example layout
@@ -323,6 +331,39 @@ sys_plot_pixel_green:
     ; shifting 0xFF left by 8 to give us 0x0000FF00, and this is useful since shl is used to position a value
     ; between a specific range
 
+    ; check color mode
+    cmp rsi, 0
+    je .color_red
+    ; for negative values of rsi
+    jle .color_default
+
+    cmp rsi, 1
+    je .color_green
+
+    cmp rsi, 2
+    je .color_blue
+
+    ; default white color (for other values of rsi greater than 3, defaults to white as of now)
+    cmp rsi, 3
+    jge .color_default
+
+
+.color_red:
+    ; shift 0xFF by the low byte of the green mask shift of the framebuffer
+    mov rcx, [framebuffer_struct_red_mask_shift]
+    mov rdx, 0xFF
+    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
+
+
+    mov [rbx], edx ; move the 4-byte color value to a 32-bit register? What is edx doing here?
+    ; okay so since our pixel color value was built in a 64-bit register
+    ; but the pixel on a 32bpp framebuffer only occupies 4 bytes in memory, so
+    ; if we did mov [rax], rdx, we would over-write all 8 bytes into memory at the starting pixel address
+    ; so the extra 4 bytes would overwrite the next pixel.
+
+    ret
+
+.color_green:
     ; shift 0xFF by the low byte of the green mask shift of the framebuffer
     mov rcx, [framebuffer_struct_green_mask_shift]
     mov rdx, 0xFF
@@ -337,6 +378,46 @@ sys_plot_pixel_green:
 
     ret
 
+.color_blue:
+    ; shift 0xFF by the low byte of the green mask shift of the framebuffer
+    mov rcx, [framebuffer_struct_blue_mask_shift]
+    mov rdx, 0xFF
+    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
+
+
+    mov [rbx], edx ; move the 4-byte color value to a 32-bit register? What is edx doing here?
+    ; okay so since our pixel color value was built in a 64-bit register
+    ; but the pixel on a 32bpp framebuffer only occupies 4 bytes in memory, so
+    ; if we did mov [rax], rdx, we would over-write all 8 bytes into memory at the starting pixel address
+    ; so the extra 4 bytes would overwrite the next pixel.
+
+    ret
+
+.color_default:
+    ; needs all three channels to be set to max simultaneously
+
+    ; shift 0xFF by the low byte of the green mask shift of the framebuffer
+    mov rcx, [framebuffer_struct_red_mask_shift]
+    mov rdx, 0xFF
+    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
+    mov rax, rdx ; rax is free to use internally
+
+    ; shift 0xFF by the low byte of the green mask shift of the framebuffer
+    mov rcx, [framebuffer_struct_green_mask_shift]
+    mov rdx, 0xFF
+    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
+    or rax, rdx ; bitwise OR, 1 OR 1 = 1
+
+    ; shift 0xFF by the low byte of the green mask shift of the framebuffer
+    mov rcx, [framebuffer_struct_blue_mask_shift]
+    mov rdx, 0xFF
+    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
+    or rax, rdx ; bitwise OR, 1 OR 1 = 1
+
+    mov [rbx], eax ; not edx this time since we need the low 4 bytes stored in rax
+
+    ret
+
 sys_query_limine_framebuffer:
     ; now I am free to use the registers from rbx through rdx
     ; do I need to preserve rax as well, since I have effectively extracted what I need from the bootloader response?
@@ -347,7 +428,7 @@ sys_query_limine_framebuffer:
 
     ; Orion syscall ABI, registers from rbx onwards will either take arguments
     ; or handle stuff internally.
-    ; rax is ONLY for taking in syscall numbers
+    ; rax is ONLY for taking in syscall numbers (but becomes free to use interally post dispatch)
 
     mov rbx, [frambuffer_request + 40] ; response field
     test rbx, rbx
@@ -382,12 +463,29 @@ sys_query_limine_framebuffer:
     ; word is 2 bytes (16-bits)
     mov [framebuffer_struct_bpp], cx ; cx holds exactly 2 bytes, not using rax here since we would then be writing extra garbage
 
+    ; red
+    movzx rcx, byte [rbx+35] ; red_mask_size
+    ; byte, is well, 1 byte (8-bits).
+    mov [framebuffer_struct_red_mask_size], cl ; cl holds exactly 1 byte
+
+    movzx rcx, byte [rbx+36] ; red_mask_shift
+    mov [framebuffer_struct_red_mask_shift], cl
+
+    ; green
     movzx rcx, byte [rbx+37] ; green_mask_size
     ; byte, is well, 1 byte (8-bits).
     mov [framebuffer_struct_green_mask_size], cl ; cl holds exactly 1 byte
 
     movzx rcx, byte [rbx+38] ; green_mask_shift
     mov [framebuffer_struct_green_mask_shift], cl
+
+    ; blue
+    movzx rcx, byte [rbx+39] ; blue_mask_size
+    ; byte, is well, 1 byte (8-bits).
+    mov [framebuffer_struct_blue_mask_size], cl ; cl holds exactly 1 byte
+
+    movzx rcx, byte [rbx+40] ; blue_mask_shift
+    mov [framebuffer_struct_blue_mask_shift], cl
 
     ret
 
@@ -448,6 +546,7 @@ _start:
     mov rcx, orion_hello_message_length
     mov rdx, [pen_x] ; computed from syscall 2
     mov rdi, [pen_y] ; computed from syscall 2
+    mov rsi, -1 ; color mode, should default to white for now.
     call syscall_dispatch
 
     ; sys_exit
