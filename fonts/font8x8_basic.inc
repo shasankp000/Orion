@@ -1,7 +1,7 @@
-; Auto-generated from font8x8_basic.h - do not edit by hand.
+; Auto-generated from font8x8_basic.h, do not edit by hand.
 ; Regenerate with: python3 gen_font_inc.py font8x8_basic.h font8x8_basic.inc
 ; 128 glyphs, 8 bytes each, indexed 0x00-0x7F.
-; Runtime lookup: font8x8_basic + (char_code * 8)
+; Runtime lookup: font8x8_basic -- (char_code * 8)
 
 section .rodata
 
