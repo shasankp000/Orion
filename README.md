@@ -44,6 +44,7 @@ The R8 register as of this moment is not being used to implement the permission 
 | 3 | `sys_plot_pixel` | `RCX` = x, `RDX` = y, `RSI` = color_mode, uses `RDI` internally as a temporary move register. | Plots a single pixel at the given framebuffer coordinates with the specified color mode. Currently supported color modes: `0`: red, `1`: green, `2`: blue, `3`: white, with a `4`: custom color mode planned, currently any value of `RSI` less than `0` or greater than `4` will default to the color `white`. Internal building block -- mainly called directly by syscall 4, not typically invoked on its own. |
 | 4 | `sys_print_ASCII_string` | `RBX` = buffer pointer, `RCX` = length, `RDX` = x, `RDI` = y, `RSI` = color mode (same as `sys_plot_pixel`, since `sys_plot_pixel` is called internally.) | Renders an ASCII string in the specified color mode, using a hand-rolled 8x8 bitmap font renderer (`font8x8_basic`), starting at the given coordinates. Calls `sys_plot_pixel` directly (not through the dispatcher) for each lit pixel.  |
 | 5 | `sys_exit` | none | Halts the CPU (`cli` / `hlt` loop). Never returns. |
+| 6 | `sys_clear_screen` | none | Clears the screen, sets every pixel to black. Uses the `R13` and `R14` registers internally |
 
 Syscalls with a data dependency must be called in the correct order -- e.g. syscall 2 requires syscall 1's
 output (`framebuffer_struct_width`/`height`), and syscall 4 requires syscall 2's output (`pen_x`/`pen_y`)

@@ -92,6 +92,7 @@ section .rodata
         dq sys_plot_pixel                   ; syscall 3
         dq sys_print_ASCII_string           ; syscall 4
         dq sys_exit                         ; syscall 5
+        dq sys_clear_screen                 ; syscall 6
 
     syscall_table_end:
         %define SYSCALL_COUNT ((syscall_table_end - syscall_table) / 8)
@@ -110,6 +111,63 @@ syscall_dispatch:
 
 .invalid_syscall:
     jmp sys_exit
+
+sys_clear_screen:
+    ;
+    ; A method that will clear the screen
+    ;
+    ; sys_clear_screen():
+    ;
+    ;    start_x = 0
+    ;    start_y = 0
+    ;
+    ;    stop_x = framebuffer_struct_width
+    ;    stop_y = framebuffer_struct_height
+    ;
+    ;    for y = start_y; y < stop_y; y++:
+    ;        for x = start_x; x < stop_x; x++:
+    ;
+    ;            set pen_x = x
+    ;            set pen_y = y
+    ;            call sys_plot_pixel(pen_x, pen_y, 4) ; 4 is now black color
+    ;
+    ;
+    ;    ret
+
+    ; loop counters
+    ; r13 = outer loop counter
+    ; r14 = inner loop counter
+    mov r13, 0
+    mov r14, 0
+    mov rsi, 4 ; black color mode
+    jmp .loop_outer_clear_screen
+
+.loop_outer_clear_screen:
+    cmp r13, [framebuffer_struct_width]
+    ; reset r14 to zero
+    mov r14, 0
+    jge .done_loop_outer_clear_screen
+    jl .loop_inner_clear_screen ; jump if less than
+
+.loop_inner_clear_screen:
+    cmp r14, [framebuffer_struct_height]
+    jge .done_loop_inner_clear_screen
+
+    ; clear screen
+    mov rcx, r13 ; fixed row
+    mov rdx, r14 ; every column
+    mov rax, 3
+    call syscall_dispatch
+
+    inc r14
+    jmp .loop_inner_clear_screen
+
+.done_loop_outer_clear_screen:
+    ret
+
+.done_loop_inner_clear_screen:
+    inc r13
+    jmp .loop_outer_clear_screen
 
 sys_get_center_of_screen:
     ; rbx = length of input text
@@ -343,10 +401,16 @@ sys_plot_pixel:
     cmp rsi, 2
     je .color_blue
 
-    ; default white color (for other values of rsi greater than 3, defaults to white as of now)
     cmp rsi, 3
-    jge .color_default
+    je .color_default
 
+    ; black color
+    cmp rsi, 4
+    je .color_black
+
+    ; default white color (for other values of rsi greater than 4, defaults to white as of now)
+    cmp rsi, 5
+    jge .color_default
 
 .color_red:
     ; shift 0xFF by the low byte of the green mask shift of the framebuffer
@@ -390,6 +454,36 @@ sys_plot_pixel:
     ; but the pixel on a 32bpp framebuffer only occupies 4 bytes in memory, so
     ; if we did mov [rax], rdx, we would over-write all 8 bytes into memory at the starting pixel address
     ; so the extra 4 bytes would overwrite the next pixel.
+
+    ret
+
+.color_black:
+    ; needs all three channels to be set to min simultaneously
+
+    ; shift 0x00 by the low byte of the green mask shift of the framebuffer
+;    mov rcx, [framebuffer_struct_red_mask_shift]
+;    mov rdx, 0x00
+;    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
+;    mov rax, rdx ; rax is free to use internally
+
+    ; shift 0x00 by the low byte of the green mask shift of the framebuffer
+;    mov rcx, [framebuffer_struct_green_mask_shift]
+;    mov rdx, 0x00
+;    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
+;    or rax, rdx ; bitwise OR, 1 OR 1 = 1
+
+    ; shift 0x00 by the low byte of the green mask shift of the framebuffer
+;    mov rcx, [framebuffer_struct_blue_mask_shift]
+;    mov rdx, 0x00
+;    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
+;    or rax, rdx ; bitwise OR, 1 OR 1 = 1
+
+    ; the above stuff works, and is mathematically valid, but computationally redundant
+    ; still I am keep that block as commments
+    ; a faster way to do this just:
+
+    mov eax, 0 ; guard, even though eax should 0 at this stage, a manual mov secures against any edge cases
+    mov [rbx], eax ; not edx this time since we need the low 4 bytes stored in rax
 
     ret
 
@@ -547,6 +641,9 @@ _start:
     mov rdx, [pen_x] ; computed from syscall 2
     mov rdi, [pen_y] ; computed from syscall 2
     mov rsi, -1 ; color mode, should default to white for now.
+    call syscall_dispatch
+
+    mov rax, 6
     call syscall_dispatch
 
     ; sys_exit
