@@ -85,7 +85,7 @@ section .rodata
         dq sys_query_limine_bootloader_info ; syscall 0
         dq sys_query_limine_framebuffer     ; syscall 1
         dq sys_get_center_of_screen         ; syscall 2
-        dq sys_plot_pixel                   ; syscall 3
+        dq sys_plot_pixel_green             ; syscall 3
         dq sys_print_ASCII_string_green     ; syscall 4
         dq sys_exit                         ; syscall 5
 
@@ -256,7 +256,7 @@ sys_print_ASCII_string_green:
     mov rdx, [pen_y]
     add rdx, r14 ; rsi = pen_y + row (our y)
     ; plot_pixel's reserved registers will be safe to use now.
-    call sys_plot_pixel
+    call sys_plot_pixel_green
 
     inc r15
     mov [loop_inner_print_ASCII_character_green_counter], r15
@@ -274,8 +274,9 @@ sys_print_ASCII_string_green:
 .done_loop_inner_print_ASCII_character_green:
     ret
 
-sys_plot_pixel:
+sys_plot_pixel_green:
     ; This should be a protected syscall later.
+    ; This syscall plots pixels with the green color on them.
 
     ; Clobbers: rbx, rcx, rdx, and rsi so callers must save these registers beforehand.
     ; method to plot a pixel given the x and y coordinates.
