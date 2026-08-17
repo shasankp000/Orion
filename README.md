@@ -27,7 +27,7 @@ will try to stick to `RBX -> RCX -> RDX -> RSI -> RDI` in order as much as possi
 rule -- in some cases a later register gets used ahead of an earlier one (see syscall 4 below for why).
 
 The kernel currently has 6 syscalls, wired into a syscall table in `.rodata`, dispatched via `syscall_dispatch`
-by reading `RAX` as the syscall number. Full pipeline (syscalls 0, 1, 2, 4, 5 in sequence) has been verified
+by reading `RAX` as the syscall number. Full pipeline (syscalls 0, 1, 2, 4, 5, 6 in sequence) has been verified
 end-to-end through the dispatcher in QEMU + GDB.
 
 The R8 register as of this moment is not being used to implement the permission system but the ~next commit will have it done~, actually no, this will take quite some time for me to get done.
