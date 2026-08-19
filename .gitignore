@@ -1,5 +1,4 @@
 .venv/*
-*.py
 iso_root/*
 .asm-lsp.toml
 limine_x86-64_abi_table.md
@@ -10,4 +9,3 @@ orion_gdt_reference.md
 *.elf
 *.iso
 *.o
-*.gdb
