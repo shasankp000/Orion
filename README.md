@@ -138,10 +138,10 @@ Some syscalls depend on state populated by earlier syscalls:
 ```text
 sys_query_limine_framebuffer
         │
-        ▼
+        V
 sys_get_center_of_screen
         │
-        ▼
+        V
 sys_print_ASCII_string
 ```
 
