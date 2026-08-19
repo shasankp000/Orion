@@ -207,13 +207,20 @@ Orion now owns its own Global Descriptor Table.
 
 The current kernel descriptors are:
 
-  Selector   Descriptor        Privilege
-  ---------- ----------------- ----------------------------------------
-  `0x00`     Null descriptor   ---
-  `0x08`     Kernel code       Ring 0
-  `0x10`     Kernel data       Ring 0
-  `0x18`     User code         Ring 3 (prepared for future userspace)
-  `0x20`     User data         Ring 3 (prepared for future userspace)
+| Selector | Descriptor | Privilege |
+|----------|------------|-----------|
+|  `0x00`  |   Null descriptor |   ---- |
+|  `0x08`  |   Kernel code     |   Ring 0 |
+|  `0x10`  |   Kernel data     |   Ring 0 |
+|  `0x18`  |   User code       |   Ring 3 (prepared for future userspace) |
+|  `0x20`  |   User data       |   Ring 3 (prepared for future userspace) |
+
+The GDT is loaded through its GDTR structure using `lgdt`.
+
+After loading Orion's GDT, the kernel reloads its data segment registers
+with the kernel data selector and performs the required code-segment
+transition so execution continues using Orion's kernel code descriptor.
+
 
 The GDT is loaded through its GDTR structure using `lgdt`.
 
