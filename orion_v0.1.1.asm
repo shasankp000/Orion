@@ -972,11 +972,7 @@ sys_delay:
 .done_sys_delay:
     ret
 
-setup_hardware:
-    ; one-time hardware components setup.
-
-    ; ========Setup of PIT, PIC, and IDT for getting a timer interrupt.========
-    ;
+setup_legacy_PIT:
     ; desired input frequency for the PIT has been fixed to be 100hz.
     ; not changing this.
 
@@ -1066,6 +1062,9 @@ setup_hardware:
     shr eax, 8 ; we shift the low byte out and the high byte in
     out 0x40, al
 
+    ret
+
+setup_legacy_8259_PIC:
     ; now we move to the PIC, The Programmable Interrupt Controller
     ; ============================================================
     ; 8259 Programmable Interrupt Controller (PIC)
@@ -1389,6 +1388,9 @@ setup_hardware:
     mov al, 0xFE
     out 0x21, al
 
+    ret
+
+setup_IDT:
     ; now we have to interact with the IDT which the CPU uses to convert the interrupt vector
     ; to an IDT request, so we need to map that to a timer interrupt handler method
     ; this timer interrupt handler will call actual code to wake up the CPU from a halted state.
@@ -1767,7 +1769,32 @@ setup_hardware:
     pop rax
 
     iretq ; we use iretq since the CPU pushes it's own interrupt-return state onto the stack
-          ; and the when the interrupt arrives iretq restores the state.
+            ; and the when the interrupt arrives iretq restores the state.
+
+setup_legacy_hardware:
+
+    ; ========Setup of legacy PIT, legacy PIC, and IDT for getting a timer interrupt.========
+    ; setup the PIT
+    call setup_legacy_PIT
+
+    ; setup legacy PIC
+    call setup_legacy_8259_PIC
+
+    ; ========End Setup of legacy PIT, legacy PIC, and IDT for getting a timer interrupt.========
+
+    ret
+
+setup_hardware:
+    ; one-time hardware components setup.
+
+    ; setup legacy hardware (for now).
+    call setup_legacy_hardware
+
+    ; setup the IDT
+
+    call setup_IDT
+
+    ret
 
 sys_exit:
     cli
