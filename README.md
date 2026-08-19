@@ -5,6 +5,12 @@ An x86-64 kernel, built for the Limine bootloader.
 The motivation behind this project is because I am simply tired of both
 Windows AND Linux.
 
+-------------------------------------------------------------------
+
+# Project Version
+
+The kernel is at version 0.1.1
+
 ------------------------------------------------------------------------
 
 # Project Status

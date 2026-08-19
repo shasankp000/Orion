@@ -86,6 +86,9 @@ section .rodata
     ; dd    define doubleword -> 32 bits
     ; dq    define quadword   -> 64 bits
 
+    orion_kernel_version db "version: 0.1.1", 10
+    orion_kernel_version_length equ $ - orion_kernel_version
+
     orion_hello_message db "Hello, from the Orion kernel!", 10
     orion_hello_message_length equ $ - orion_hello_message
 
