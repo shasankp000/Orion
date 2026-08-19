@@ -4,6 +4,8 @@ iso_root/*
 .asm-lsp.toml
 limine_x86-64_abi_table.md
 Orion — Minimal x86-64 Assembly Bootstrap Checklist.md
+x86_io_address_space_reference.md
+orion_gdt_reference.md
 *.docx
 *.elf
 *.iso

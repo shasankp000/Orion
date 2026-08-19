@@ -1,3 +1,6 @@
+; This is the beginning of the Orion Kernel.
+; Ax x86-64 kernel, made by shasankp000 (so far, atleast)
+
 default rel;
 
 %include "fonts/font8x8_basic.inc"
@@ -75,6 +78,7 @@ section .bss
     pen_y resb 8
 
 section .rodata
+    ; This section contains read-only data.
 
     ; "describe bytes", for NASM, gives us these 4 choices
     ; db    define byte       -> 8 bits
@@ -85,6 +89,17 @@ section .rodata
     orion_hello_message db "Hello, from the Orion kernel!", 10
     orion_hello_message_length equ $ - orion_hello_message
 
+    orion_creator_name db "Created by: Shasank Prasad", 10
+    orion_creator_name_length equ $ - orion_creator_name
+
+    orion_creation_date db "Created on: 15/08/2026", 10
+    orion_creation_date_length equ $ - orion_creation_date
+
+    ; Timer configuration
+    PIT_FREQUENCY       equ 1193182
+    PIT_DIVISOR         equ 0x2E9B
+    TIMER_TICKS_PER_SEC equ PIT_FREQUENCY / PIT_DIVISOR
+
     syscall_table:
         dq sys_query_limine_bootloader_info ; syscall 0
         dq sys_query_limine_framebuffer     ; syscall 1
@@ -93,9 +108,331 @@ section .rodata
         dq sys_print_ASCII_string           ; syscall 4
         dq sys_exit                         ; syscall 5
         dq sys_clear_screen                 ; syscall 6
+        dq sys_delay                        ; syscall 7
 
     syscall_table_end:
         %define SYSCALL_COUNT ((syscall_table_end - syscall_table) / 8)
+
+section .data
+    ; writeable data section
+
+    ; Orion's Global Descriptor Table creation
+    align 8
+    gdt:
+        ; each entry in the gdt is a 64-bit entry
+        ; and every descriptor is 8 bytes long.
+        ; entry_offset = entry_number × sizeof(descriptor)
+        dq 0 ; Entry 0: The null descriptor ; 0x00
+
+        ; there's a bit of explanation to be done before constructing our kernel descriptor's
+        ; magic number
+        ; I don't want this to appear as some of dark magic, so let's understand what each of the bits mean in the kernel descriptor
+        ; and which bits do we actually mean and which bits are just filled in since we are constructing the full 64-bit magic number
+        ; 64-bit GDT segment descriptor
+        ;------------------------------------------------------------------------
+        ;
+        ;63                         56 55 52 51      48 47      40 39      32
+        ;┌─--------------------------------------------------------------------─┐
+        ;│        Base 31:24          │Flags │Limit    │ Access   │  Base 23:16 │
+        ;│                            │      │  19:16  │  byte    │             │
+        ;└─--------------------------------------------------------------------─┘
+        ;
+        ;31                         24 23                  16 15                  0
+        ;┌─-----------------------------------------------------------------------─┐
+        ;│        Base 23:16          │     Base 15:0        │    Limit 15:0       │
+        ;└─-----------------------------------------------------------------------─┘
+        ;
+        ; Now these bit ranges have different meanings, and there's a LOT to absorb and
+        ; and document here but I will keep things strictly on a need-to-know basis for the
+        ; moment,
+        ;
+        ; Bits  0–15 --> Limit 15:0
+        ; Bits 16–31 --> Base 15:0
+        ; Bits 32–39 --> Base 23:16
+        ; Bits 40–47 --> Access byte
+        ; Bits 48–51 --> Limit 19:16
+        ; Bits 52–55 --> Flags
+        ; Bits 56–63 --> Base 31:24
+        ;
+        ;  P = (present bit) (tells if the descriptor is present or not). Accepts 0/1
+        ;  DPL = Descriptor Privilege level, tells the cpu which layer of Privilege the descriptor has:
+        ;  DPL = 00 for Ring 0
+        ;  DPL = 01 for Ring 1
+        ;  DPL = 10 for Ring 2
+        ;  DPL = 11 for Ring 3
+        ;  DPL=3 doesn't itself magically put the CPU into Ring 3.
+        ;  It establishes that this descriptor belongs to the user privilege level.
+        ;  Later, when we actually transition from Ring 0 --> Ring 3, we'll have to use
+        ;  the appropriate mechanism and load the corresponding selectors.
+        ;  That's where these 0x18 and 0x20 selector values will become meaningful.
+        ;  S bit = The code/data descriptor bit tells the system if the segment is code or data. S = 1 means it's code
+        ;  Type(E) bit = Tells the CPU if the code is executable or not. E = 1 means it's executable
+        ;  R bit = Tells the CPU if the code is only readable or R/W (read and write).
+        ;  For code segment, R = 1 means the code is readable only, R = 0 means execute only
+        ;  For a data segment, R = 1 means the data is writable, R = 0 means the data is read-only.
+        ;  DC bit --> Conforming segments
+        ;  Conforming segments are an older x86 privilege mechanism that
+        ;  allows code at a lower privilege level to execute code belonging
+        ;  to a higher-privilege segment under specific rules.
+        ;  DC = 0 non-conforming code
+        ;  DC = 1 conforming code.
+        ;  We don't need DC for Orion's kernel code though.
+        ;  A = Acessed bit, this bit tells software whether the CPU has accessed the segment.
+        ;  A = Accessed bit.
+        ;
+        ;  The CPU sets this bit to 1 when the segment is loaded into a
+        ;  segment register such as CS, DS, ES or SS.
+        ;
+        ;  We can initialize it to 0 and allow the CPU to set it.
+        ;
+        ;  HOWEVER:
+        ;
+        ;  If the GDT is stored in read-only memory, the CPU cannot modify
+        ;  the descriptor to set A = 1. This can cause a page fault.
+        ;
+        ;  Therefore, if the GDT is in read-only memory, we can initialize
+        ;  A = 1 ourselves.
+        ;  But the better thing to do is to just NOT define the GDT in read-only data section.
+        ;  We initially set A to 0 and then CPU over-writes this bit as it accesses code segment.
+        ;
+        ; So the access byte looks like this:
+        ;
+        ; 47 46 45 44 43 42 41 40
+        ; ┌--┬----┬---┬--┬--┬--┬--┐
+        ; │ P│ DPL│ S │ E│DC│ R│ A│
+        ; └--┴----┴---┴--┴--┴--┴--┘
+        ;
+        ; Considering Orion's kernel code our Access byte will come out as:
+        ;
+        ;  1 00 1 1 0 1 0
+        ;
+        ; Now the Flags
+        ;
+        ;  55  54  53  52
+        ; ┌--┬---┬---┬---┐
+        ; │ G│ D │ L │AVL│
+        ; └--┴---┴---┴---┘
+        ;
+        ; G = Granularity G controls the unit in which the segment Limit is interpreted.
+        ; The Limit field is 20 bits wide, but G determines whether those 20 bits represent bytes or 4-KiB pages.
+        ;
+        ; For normal 64-bit code/data segments, base and limit don't provide the memory isolation mechanism anymore.
+        ; Paging does that.
+        ;
+        ; For the actual flat descriptor though, we need to set G = 1 as per the convention.
+        ;
+        ; D controls the default operand/address size for a legacy code segment.
+        ;
+        ; However since we are running in 64-bit long mode, L takes precedence and tells the CPU
+        ; to execute the code in 64-bit long mode. Hence D = 0.
+        ;
+        ; L = tells the CPU if the descriptor is in 64-bit long mode or not.  Accepts 0/1
+        ;
+        ; AVL = Availability to software
+        ; It is a bit that the CPU essentially provides for software's own use.
+        ; Operating systems can use it for their own bookkeeping if they want.
+        ; As of the moment we are not using it yet.
+        ; So we set AVL to 0.
+        ;
+        ; Lastly, base and Limit (from Granularity).
+        ;
+        ;           Base
+        ;            |
+        ;            V
+        ;    Memory -┼--------------------------─┐
+        ;            |                           |
+        ;            |         Segment           |
+        ;            |                           |
+        ;            └--------------------------─┤
+        ;                                        |
+        ;                                        V
+        ;                                    Base + Limit
+        ;
+        ; The Base specifies the starting address of the segment.
+        ; For base = 0x100000, it would mean the segment starts at that address
+        ;
+        ; The Limit specifies how far the segment extends.
+        ;
+        ; For example:
+        ; Base  = 0x100000
+        ; Limit = 0xFFFF
+        ; would describe a segment through
+        ; 0x100000 --> 0x10FFFF
+        ;
+        ; But in modern x86-64 assembly, especially in 64-bit long mode most of segmentation is already disabled
+        ; And we can get memory protection and isolation from paging.
+        ; so we just set base to 0 then.
+        ; and limit to 0xFFFF (16 bits) (bits 0 to 15)
+        ; and limit to just 0xF (for the remaining upper 4 bits of the limit) (bits 48-51)
+        ; so the total Limit size comes down to 20 bits.
+        ;
+        ; Constructing all these in the given order.
+        ;
+        ; Read this number backwards from bit 63 down to 0
+        ;
+        ; base bits 63 to 54: 0
+        ;
+        ; 00000000000
+        ;
+        ; bits 55 to 52, flags:
+        ;
+        ; G D L AVL
+        ;
+        ; 1 0 1 0
+        ;
+        ; Bit 48 to 51: upper 4 bits of limit
+        ;
+        ; F = 1111
+        ;
+        ; Bits 47 to 40, the access byte:
+        ;
+        ; 1 00 1 1 0 1 0 -> 9A --> 0x9A
+        ;
+        ; Bits 39-32, base : all zero
+        ;
+        ; 00000000
+        ;
+        ; Bits 31 to 16, base: all zero
+        ;
+        ; 0000000000000000
+        ;
+        ; Bits 15 to 0, 16 bit limit: FFFF --> 1111 1111 1111 1111
+        ;
+        ; So our final kernel descriptor code becomes:
+        ;
+        ; 0000000000010101111100110100000000000000000000000001111111111111111 in binary
+        ;
+        ; or 0x00AF9A000000FFFF in hexadecimal
+
+
+        dq 0x00AF9A000000FFFF ; Entry 1: The kernel code segment ; 0x08
+
+        ; for the kernel data segment we need a similar magic value with these bits changed in the access-byte
+        ; S = 1 (code/data descriptor)
+        ; E = 0 (not executable, data)
+        ; R = 1 (read/write)
+        ; The data descriptor cannot have L = 1.
+        ; L = 1 designates a 64-bit code segment.
+        ; Attempting to load this descriptor as a data segment causes a #GP (General Protection Fault).
+        ; Because L specifically means "64-bit code segment."
+        ; It isn't a general-purpose "this segment is used while the CPU is in 64-bit mode" flag.
+        ;
+        ; so:
+        ;
+        ; 47 46 45 44 43 42 41 40
+        ; ┌--┬----┬---┬--┬--┬--┬--┐
+        ; │ P│ DPL│ S │ E│DC│ R│ A│
+        ; └--┴----┴---┴--┴--┴--┴--┘
+        ;
+        ; Earlier we had for the access byte:
+        ;
+        ;  1 00 1 1 0 1 0 (for the kernel code descriptor)
+        ;
+        ; Now we will have for the access byte :
+        ;
+        ;  1 00 1 0 0 1 0 -> only one bit flipped.
+        ;
+        ; bits 55 to 52, flags:
+        ;
+        ; G D L AVL
+        ;
+        ; 1 0 0 0
+        ;
+        ; again, only a single bit flipped.
+        ;
+        ; So our magic number will be:
+        ;
+        ; 0000000000010001111100100100000000000000000000000001111111111111111 in binary
+        ;
+        ; 8F92000000FFFF in hexadecimal
+        ;
+        ; or 0x008F92000000FFFF in hexadecimal
+
+        dq 0x008F92000000FFFF ; Entry 2: The kernel data segment ; 0x10
+
+        ; now we head into userspace!
+        ;
+        ; We will have the same logic for constructing the magic numbers, except
+        ; the DPL (Descriptor Privilege Level) will shift from 00 to 11 for Ring 3
+        ; which is where userspace lies at.
+
+        ; so:
+        ;
+        ; 47 46 45 44 43 42 41 40
+        ; ┌--┬----┬---┬--┬--┬--┬--┐
+        ; │ P│ DPL│ S │ E│DC│ R│ A│
+        ; └--┴----┴---┴--┴--┴--┴--┘
+        ;
+        ;  Earlier we had for the access byte:
+        ;
+        ;  1 00 1 1 0 1 0 (for the kernel code descriptor)
+        ;
+        ;  1 11 1 1 0 1 0 (for the user-space code descriptor)
+        ;
+        ; 0000000000010101111111110100000000000000000000000001111111111111111 in binary
+        ;
+        ; AFFA000000FFFF in hexadecimal
+        ;
+        ; or 0x00AFFA000000FFFF in hexadecimal
+
+        dq 0x00AFFA000000FFFF ; Entry 3: The user code segment ; 0x18
+
+        ; same as the kernel-data segment, we flip E to 0 in the access byte
+        ; and L to 0 in the flags
+        ; and DPL = 11 of-course.
+        ;
+        ; so:
+        ;
+        ; 47 46 45 44 43 42 41 40
+        ; ┌--┬----┬---┬--┬--┬--┬--┐
+        ; │ P│ DPL│ S │ E│DC│ R│ A│
+        ; └--┴----┴---┴--┴--┴--┴--┘
+        ;
+        ; Earlier we had for the access byte:
+        ;
+        ;  1 11 1 1 0 1 0 (for the user-space code descriptor)
+        ;
+        ; Now we will have for the access byte :
+        ;
+        ;  1 11 1 0 0 1 0 -> only one bit flipped.
+        ;
+        ; bits 55 to 52, flags:
+        ;
+        ; G D L AVL
+        ;
+        ; 1 0 0 0
+        ;
+        ; 0000000000010001111111100100000000000000000000000001111111111111111 in binary
+        ;
+        ; 8FF2000000FFFF in hexadecimal
+        ;
+        ; or 0x008FF2000000FFFF in hexadecimal
+
+        dq 0x008FF2000000FFFF ; Entry 4: The user data segment ; 0x20
+
+        ; and there we have our GDT described.
+
+    gdt_end:
+
+    gdt_descriptor:
+        dw gdt_end - gdt - 1
+        dq gdt
+
+    ; Describing the Interrupt Descriptor Table now
+
+    align 16
+
+    idt:
+        times 256 dq 0, 0 ; times n tells NASM do something n times, in this instance it tells NASM to generate the same 8 bytes copy 256 times
+        ; so we have
+    idt_end:
+
+    idt_descriptor:
+        dw idt_end - idt - 1
+        dq idt
+
+    timer_ticks:
+        dq 0 ; the timer tick state, owned by the kernel.
 
 section .text
     global _start
@@ -608,6 +945,827 @@ sys_query_limine_bootloader_info:
 
     ret
 
+sys_delay:
+    ; sys_delay(input time in seconds)
+    ; input time in seconds
+    ; rbx = seconds
+    ; the algorithm will be as such:
+    ; current_ticks = timer_ticks (defined in .data and updated by the timer)
+    ; target_ticks = current_ticks + ((input time in seconds) * (ticks_per_seconds))
+    ;
+    ; while current_ticks < target_ticks:
+    ;    wait
+    mov rdx, rbx ; copy requested seconds into rdx
+    mov rcx, [rel timer_ticks]
+    imul rdx, TIMER_TICKS_PER_SEC
+    add rdx, rcx ; target_ticks
+    jmp .loop_sys_delay
+
+.loop_sys_delay:
+    mov rcx, [rel timer_ticks]
+    cmp rcx, rdx
+    jl .loop_sys_delay
+
+.done_sys_delay:
+    ret
+
+setup_hardware:
+    ; one-time hardware components setup.
+
+    ; ========Setup of PIT, PIC, and IDT for getting a timer interrupt.========
+    ;
+    ; desired input frequency for the PIT has been fixed to be 100hz.
+    ; not changing this.
+
+    ; The hardware path of getting an interrupt to the CPU is as follows:
+    ; PIT --> IRQ0 --> PIC --> Interrupt vector --> CPU --> IDT --> timer handler
+
+    ; The PIT, Programmable interrupt timer, takes in a specifc request format
+    ; It takes in a 1 byte instruction, where a certain number of bits denote different aspects of the request
+    ; The bits are read and arranged backwards
+    ; bits 7 and 6 : PIT channel number.
+    ; bits 5 and 4 : Tell PIT counter how data will be supplied
+    ; bits 3, 2 and 1 : PIT timer operating mode
+    ; bit 0: Binary vs BCD counting
+
+    ; acceptable values per bit range:
+    ; bits: 7 to 6: PIT Channel number
+    ;    00 : Channel 0
+    ;    01 : Channel 1
+    ;    10 : Channel 2
+    ;    11 : read-back mode
+    ;
+    ; bits 5 to 4: Access Mode
+    ;   00 = Latch count value (for reading back current timer state)
+    ;   01 = Access low byte only (Bits 0-7)
+    ;   10 = Access high byte only (Bits 8-15)
+    ;   11 = Access low byte first, then high byte (Standard 16-bit payload)
+    ;
+    ; bits 3, 2 and 1: Operating Mode
+    ;   000 = Mode 0: Interrupt on terminal count (Good for one-shot delays)
+    ;   001 = Mode 1: Hardware re-triggerable one-shot
+    ;   010 = Mode 2: Rate generator (Generates cyclic periodic interrupts) -> Best for OS multitasking!
+    ;   011 = Mode 3: Square wave generator (Used for PC speaker tones)
+    ;   100 = Mode 4: Software triggered strobe
+    ;   101 = Mode 5: Hardware triggered strobe
+    ;   Note: 'x' can be 0 or 1; standard practice uses 010 and 011.
+    ;
+    ; bit 0: Counting Mode
+    ;   0 = Binary counter (16-bit, standard for x86)
+    ;   1 = BCD counter (Binary Coded Decimal, 4 decades)
+
+    ; Since we want to use channel 1, that's
+    ; 00
+    ; want to send both low and high bytes, as our divisor is 16-bit
+    ; 11
+    ; Need a square wave generator for a steady source of interrupts
+    ; 011
+    ; Need a binary counter
+    ; 0
+    ; That makes the request value: 00110110
+    ; The hexadecimal equivalent is 36, or 0x36
+    ; The request size is 8 bits, or 1 byte, so we will use the al register
+    mov al, 0x36
+    ; The PIT has specific ports, each have a following function
+    ; 0x40: (3x4+0 = 12), port 12, which handles channel 0 data
+    ; 0x41: port 13, which handles channel 1 data
+    ; 0x42: port 14, which handles channel 2 data
+    ; 0x43: port 15, which is the command / mode register
+    ; since we setting the mode of the PIT, we will use the 0x43 port
+    ; this is done using the out operation
+    out 0x43, al
+
+    ; the calculation for the divisor we want is given by
+    ;
+    ;                  PIT base frequency
+    ;  PIT divisor = -----------------------
+    ;                  desired frequency
+    ;
+    ;
+    ; Since we wish to achieve an output frequency of 100hz
+    ;
+    ;
+    ;                     1193182 (PIT base frequency) (defined in .rodata as PIT_FREQUENCY)
+    ; PIT divisor = ------------------------------------------------------------------------
+    ;                     100
+    ;
+    ; PIT divisor = 11931
+    ;
+    ; as this is a 16-bit divisor, we need the 16-bit register
+
+    mov ax, PIT_DIVISOR ; 16-bit value
+
+    ; we need the quotient
+    ; send low byte first
+    out 0x40, al
+    ; send high byte next
+    ; out cannot accept ah, so:
+    shr eax, 8 ; we shift the low byte out and the high byte in
+    out 0x40, al
+
+    ; now we move to the PIC, The Programmable Interrupt Controller
+    ; ============================================================
+    ; 8259 Programmable Interrupt Controller (PIC)
+    ; ============================================================
+    ;
+    ; The legacy x86 PIC consists of two 8259-compatible controllers:
+    ;
+    ;   Master PIC
+    ;       Command port = 0x20
+    ;       Data port    = 0x21
+    ;
+    ;   Slave PIC
+    ;       Command port = 0xA0
+    ;       Data port    = 0xA1
+    ;
+    ; The master handles IRQ0-IRQ7.
+    ; The slave handles IRQ8-IRQ15.
+    ;
+    ; The slave is connected to IRQ2 of the master.
+    ;
+    ; For Orion's PIT timer:
+    ;
+    ;   PIT Channel 0
+    ;        |
+    ;        | IRQ0
+    ;        V
+    ;   Master PIC
+    ;        |
+    ;        | interrupt vector
+    ;        V
+    ;       CPU
+    ;        |
+    ;        V
+    ;       IDT
+    ;
+    ; ============================================================
+    ; PIC Initialization Command Words
+    ; ============================================================
+    ;
+    ; The PIC is initialized by sending ICW1, ICW2, ICW3 and
+    ; optionally ICW4 to its command/data ports.
+    ;
+    ; ICW1 -> sent to command port
+    ; ICW2 -> sent to data port
+    ; ICW3 -> sent to data port
+    ; ICW4 -> sent to data port
+    ;
+    ; The PIC determines whether ICW4 is required from ICW1.
+    ;
+    ;
+    ; ------------------------------------------------------------
+    ; ICW1
+    ; ------------------------------------------------------------
+    ;
+    ; Bit:  7 6 5 4 3 2 1 0
+    ;       x x x 1 x x x x
+    ;
+    ; Bit 0: IC4
+    ;
+    ;   0 = ICW4 is not required
+    ;   1 = ICW4 is required
+    ;
+    ; Bit 1: SNGL
+    ;
+    ;   0 = Cascade mode
+    ;   1 = Single PIC
+    ;
+    ; Bit 2: ADI
+    ;
+    ;   0 = Call address interval = 8
+    ;   1 = Call address interval = 4
+    ;
+    ; Bit 3: LTIM
+    ;
+    ;   0 = Edge triggered
+    ;   1 = Level triggered
+    ;
+    ; Bits 4:5
+    ;
+    ;   Bit 4 must be 1 to identify this as ICW1.
+    ;   Other bits are reserved / implementation-defined.
+    ;
+    ; Bits 6:7
+    ;
+    ;   Reserved.
+    ;
+    ;
+    ; For a normal PC-compatible x86 setup:
+    ;
+    ;   ICW1 = 00010001b = 0x11
+    ;
+    ; This means:
+    ;
+    ;   ICW4 required
+    ;   cascade mode
+    ;   edge-triggered interrupts
+    ;
+    ;
+    ; ------------------------------------------------------------
+    ; ICW2
+    ; ------------------------------------------------------------
+    ;
+    ; ICW2 specifies the BASE interrupt vector for the PIC.
+    ;
+    ; For the master PIC:
+    ;
+    ;   IRQ0 -> base + 0
+    ;   IRQ1 -> base + 1
+    ;   IRQ2 -> base + 2
+    ;   ...
+    ;   IRQ7 -> base + 7
+    ;
+    ; For Orion we normally remap the master PIC to:
+    ;
+    ;   base = 0x20
+    ;
+    ; Therefore:
+    ;
+    ;   IRQ0 -> interrupt vector 0x20
+    ;   IRQ1 -> interrupt vector 0x21
+    ;   IRQ2 -> interrupt vector 0x22
+    ;   ...
+    ;   IRQ7 -> interrupt vector 0x27
+    ;
+    ; The reason for remapping is that the original legacy PIC
+    ; vectors overlap with CPU exception vectors in protected/long
+    ; mode.
+    ;
+    ;
+    ; ------------------------------------------------------------
+    ; ICW3
+    ; ------------------------------------------------------------
+    ;
+    ; ICW3 describes how the two PICs are connected.
+    ;
+    ; For the MASTER PIC:
+    ;
+    ;   Each bit corresponds to an IRQ input.
+    ;
+    ;   bit 0 -> IRQ0
+    ;   bit 1 -> IRQ1
+    ;   bit 2 -> IRQ2
+    ;   ...
+    ;   bit 7 -> IRQ7
+    ;
+    ;   A bit set to 1 means a slave PIC is connected to
+    ;   that IRQ line.
+    ;
+    ; The slave PIC is connected to IRQ2:
+    ;
+    ;   00000100b = 0x04
+    ;
+    ; For the SLAVE PIC:
+    ;
+    ;   Bits 2:0 specify which master's IRQ line the slave
+    ;   is connected to.
+    ;
+    ; Since the slave is connected to master IRQ2:
+    ;
+    ;   00000010b = 0x02
+    ;
+    ;
+    ; Therefore:
+    ;
+    ;   Master ICW3 = 0x04
+    ;   Slave  ICW3 = 0x02
+    ;
+    ;
+    ; ------------------------------------------------------------
+    ; ICW4
+    ; ------------------------------------------------------------
+    ;
+    ; ICW4 controls the PIC's operating mode.
+    ;
+    ; Bit:  7 6 5 4 3 2 1 0
+    ;       x x x x x x x x
+    ;
+    ; Bit 0: 8086/88 mode
+    ;
+    ;   0 = MCS-80/85 mode
+    ;   1 = 8086/88 mode
+    ;
+    ; Bit 1: AEOI
+    ;
+    ;   0 = Normal End Of Interrupt
+    ;   1 = Automatic End Of Interrupt
+    ;
+    ; Bit 2: M/S
+    ;
+    ;   Only meaningful when BUF = 1.
+    ;
+    ; Bit 3: BUF
+    ;
+    ;   0 = Non-buffered mode
+    ;   1 = Buffered mode
+    ;
+    ; Bit 4: SFNM
+    ;
+    ;   0 = Special Fully Nested Mode disabled
+    ;   1 = Special Fully Nested Mode enabled
+    ;
+    ; For a normal x86 protected/long-mode setup:
+    ;
+    ;   ICW4 = 00000001b = 0x01
+    ;
+    ; This selects 8086/88 mode.
+    ;
+    ;
+    ; ============================================================
+    ; PIC Operational Command Words
+    ; ============================================================
+    ;
+    ; After initialization, the PIC can receive operational
+    ; commands.
+    ;
+    ; The most important one for Orion initially is the EOI
+    ; (End Of Interrupt) command.
+    ;
+    ; After servicing a hardware interrupt, the interrupt handler
+    ; must tell the PIC that the interrupt has been handled.
+    ;
+    ; For an IRQ originating on the MASTER PIC:
+    ;
+    ;   mov al, 0x20
+    ;   out 0x20, al
+    ;
+    ; 0x20 is the Non-Specific EOI command.
+    ;
+    ; For an IRQ originating on the SLAVE PIC, an EOI must normally
+    ; be sent to both:
+    ;
+    ;   out 0xA0, al    ; slave
+    ;   out 0x20, al    ; master
+    ;
+    ; ===========================================================
+
+    ; First half of the process
+    ; We need to prepare the PIC to receive the IRQ0 from the PIT
+    ; So, we need to start with ICW1
+    ; For a standard x86 PC interrupt stuff
+    ; We need an ICW1 request that tells:
+    ; It's an ICW4 (Bit 0): 1
+    ; It's in cascade mode (Bit 1): 0
+    ; It has a call address interval of 8 (Bit 2): 0
+    ; It's edge triggered (Bit 3): 0
+    ; It IS an ICW1 request (bit 4 must be 1): 1
+    ; Rest are reserved bits to set to 0 (bits 5, 6 and 7)
+    ; This gives us: 00010001 -> or 0x11 -> 8 bits, 1 byte
+    ; The addresses of the two PIC controllers are:
+    ;   Master PIC
+    ;       Command port = 0x20
+    ;       Data port    = 0x21
+    ;
+    ;   Slave PIC
+    ;       Command port = 0xA0
+    ;       Data port    = 0xA1
+
+    ; We need to initialize BOTH the master and slave PIC controllers
+    ; Master PIC ICW1 initialization
+    mov al, 0x11
+    out 0x20, al
+
+    ; Slave PIC ICW1 initialization
+    mov al, 0x11
+    out 0xA0, al
+
+    ; onwards to ICW2 now.
+    ; ICW2 specifies the BASE interrupt vector for the PIC
+    ; The BASE is configuration value stored inside the PIC that, when added to an IRQ number
+    ; results in the interrupt vector address translated for the CPU to use.
+    ; So:
+    ; IRQ0 = base + 0
+    ; IRQ1 = base + 1
+    ; IRQ2 = base + 2
+    ; .....
+    ; For the Orion kernel, we will remap the base of the master PIC to 0x20 to prevent it from clashing with
+    ; CPU exception vectors as we are booting 64-bit long mode.
+    ; So for us:
+    ; IRQ0 = 0x20 + 0 = 0x20
+    ; This value will go into the data port of the master PIC controller
+    mov al, 0x20
+    out 0x21, al
+
+    ; onwards to ICW3 now.
+    ; ICW3 is just...weird.
+    ; Because irrespective of the IRQ number, we have to tell the master PIC controller
+    ; that it has a slave PIC controller attached to via the line used for handling IRQ2.
+    ; The request is as follows
+    ; it's a 1 byte request, where bits 0 to 7 are IRQ0 to IRQ7 respectively on the master PIC
+    ; and bits 0 to 7 on the slave PIC line handle IRQ 8 to IRQ 15.
+    ; For IRQ0 we don't need anything else save just tell the master PIC that it has a slave PIC
+    ; attached to it via the IRQ2 line
+    ; so the ICW3 request becomes 00000100 or 4 in hexadecimal, or 0x04
+
+    mov al, 0x04
+    out 0x21, al ; into the data port of the master PIC
+
+    ; onwards to ICW4, the operating mode of the PIC.
+    ; This is again a 1 byte request with bits from 0 to 7 having different values
+    ; for a standard x86 pc all we need is it to be operating in the 8086/88 mode, which is set by
+    ; setting bit 0 to 1.
+    ; so the ICW4 request becomes: 00000001 or 1 or 0x01
+    ; This request is to be sent to both the master and the slave PIC controllers
+
+    mov al, 0x01,
+    out 0x21, al ; once to the master PIC
+
+    mov al, 0x01
+    out 0xA1, al ; again to the slave PIC
+
+    ; next up is configuring the Interrupt Mask Register (IMR)
+    ; The IMR is the register that will allow the IRQ0 through
+    ; For the master PIC, the IMR is it's data port after initialization
+    ; which takes 1 byte request, where if bit 0 is:
+    ; 0: then IRQ is enabled
+    ; 1: then IRQ is masked
+    ; so to allow the IRQ0 through we need to set the LSB to 0
+    ; and all the other bits to 1 since we are we not using those IRQs
+    ; so the request ends up being: 11111110 or 254 or FE_16
+    ; so we will push 0xFE
+    mov al, 0xFE
+    out 0x21, al
+
+    ; now we have to interact with the IDT which the CPU uses to convert the interrupt vector
+    ; to an IDT request, so we need to map that to a timer interrupt handler method
+    ; this timer interrupt handler will call actual code to wake up the CPU from a halted state.
+    ; now that the timer interrupt handler subroutine has been defined
+    ; we will not call it yet
+    ; since our CPU doesn't yet know where to send that interrupt request
+    ; so call .timer_interrupt_handler won't work.
+    ; we need to configure the IDT next and then map an interrupt vector
+    ; to the address of the timer interrupt handler subroutine
+
+    ; The IDT (Interrupt Descriptor Table) is a table in memory holding 256 (0-255) entries
+    ; The CPU uses this table as an index and does
+    ; IDT + (interrupt_vector × size_of_IDT_entry)
+    ; To get the effective address where execution must be transferred
+
+    ; now to do this, we need to build the IDT descriptor first to tell the CPU:
+    ; to tell the CPU where the IDT is and how large it is.
+    ; but we have run into a dependency, since the IDT gate contains a field called
+    ; Segment selector: which looks for code segment to execute when entering the timer interrupt
+    ; handler method.
+    ; For this, we need to build a GDT first. Orion doesn't have any at the moment.
+    ; GDT has been built and is operational.
+    ; The IDT has also been described now.
+    ; Now we will construct just one gate, the timer gate of the IDT.
+    ; The gate is 16-bytes (128-bits)
+    ; 127                         96 95                         64
+    ; ┌----------------------------─┬─---------------------------─┐
+    ; |        Reserved             |       Offset 63:32          |
+    ; └----------------------------─┴─---------------------------─┘
+    ;
+    ; 63                          48 47   46  45  44    40 39      32
+    ; ┌-----------------------------┬---┬-----┬---┬------┬----------┐
+    ; |      Offset 31:16           │ P | DPL | 0 | Type |    IST   |
+    ; └-----------------------------┴---┴-----┴---┴------┴----------┘
+    ;
+    ; 31                          16 15                           0
+    ; ┌-----------------------------┬-----------------------------┐
+    ; |      Segment Selector       |        Offset 15:0          |
+    ; └-----------------------------┴-----------------------------┘
+    ;
+    ; Let's understand what each field means so that we can construct the
+    ; timer gate magic number from first principles without it feeling like some
+    ; dark magic
+    ;
+    ; Bits 39 to 32
+    ;
+    ;  39        32
+    ; ┌-----┬-----┐
+    ; | Res.| IST |
+    ; └-----┴-----┘
+    ;
+    ; bits 35 to 39 = reserved
+    ;
+    ; Bits 0 to 15: offset
+    ;
+    ; These are the lower 16 bits of the intterupt handler address
+    ; The upper bits lie between bits 48 to 63:
+    ;
+    ; For example purposes, say the address of .timer_interrupt_handler was:
+    ;  0xFFFFFFFF80002000
+    ;
+    ; Then: bits 63 to 48 = 0xFFFFFFFF80002000
+    ; while lower 16 bits, bits 15 to 0: 0x2000
+    ;
+    ; Bits 16 to 31: The segment selector:
+    ;
+    ; This is the part of the IDT that connects to the GDT
+    ;
+    ; Since we will be entering Orion's kernel segment, it's at GDT entry 1:
+    ;
+    ; 1 x 8 bytes = 0x08
+    ;
+    ; so bits 31-16 would be 0x08
+    ;
+    ; Bits 34-32: The IST, Intterupt Stack Table
+    ;
+    ; It's 3 bits wide:
+    ;
+    ; 000 = IST disabled
+    ; 001 = IST 1
+    ; 002 = IST 2
+    ; ....
+    ;
+    ; A value of 0 will tell the CPU to NOT switch to an IST stack, so the CPU will use
+    ; normal interrupt-stack rules.
+    ;
+    ; A non-zero value of this will tell the CPU to switch to the corresponding stack defined by the
+    ; Task State Segment (TSS)
+    ;
+    ; But since Orion doesn't have a TSS/IST (yet, but it will, soon)
+    ;
+    ; For we now, we keep bits 34-32 = 000.
+    ;
+    ; Bits 39 to 35, reserved. We cannot assign anything there
+    ;
+    ; So, for our gate: 00000.
+    ;
+    ; Bits 43 to 40: Gate Type
+    ;
+    ; There are two relevant gate types:
+    ;
+    ; 1. 1110: 0xFE --> 64-bit interrupt gate
+    ; 2. 1111: 0xF --> 64-bit trap gate
+    ;
+    ; An interrupt gate causes the CPU to clear the IF flag when it enters the interrupt handler
+    ; A trap gate doesn't clear the IF flag. Historically the trap gate was used for legacy linux syscalls for say I/O stuff like reading a file
+    ; Trap gates are still used in modern OSes and kernels but for stuff like debugging breakpoints
+    ; or to bypass arithmetic errors like divide-by-zero exception or overflow exceptions.
+    ;
+    ; For our purpose we will need the interrupt gate
+    ;
+    ; So bits 43-40 will be 1110 --> 0xE.
+    ;
+    ; Bit 44: Reserved i.e. bit 44 = 0.
+    ;
+    ; Bits 46-45: DPL, Descriptor Privilege Level.
+    ;
+    ; It's 2 bits:
+    ;
+    ;  46 45
+    ; ┌--┬--┐
+    ; |D1|D0|
+    ; └--┴--┘
+    ;
+    ; giving:
+    ;
+    ; 00 --> Ring 0
+    ; 01 --> Ring 1
+    ; 10 --> Ring 2
+    ; 11 --> Ring 3
+    ;
+    ; But this DPL is different from that of the GDT.
+    ;
+    ; The IDT gate's DPL controls which privilege level is allowed to invoke the
+    ; gate using a software interrupt instruction such as INT n.
+    ;
+    ; For example if the IDT's DPL = 00
+    ;
+    ; Then ring 3 code simply cannot do:
+    ;
+    ; int 0x20 and then use that gate to enter the kernel.
+    ;
+    ; But a hardware IRQ doesn't care about this DPL in the same way. The hardware interrupt can still
+    ; enter the gate.
+    ;
+    ; However we will keep DPL = 00, since we don't want ring 3 code to reach our timer gate.
+    ;
+    ; Thus bits 46-45 = 00.
+    ;
+    ; Bit 47 --> Present bit(P): states if the IDT is present and usable or not.
+    ;
+    ; For our time gate:
+    ; bit 47 = 1.
+    ;
+    ; Bits 63-48: as already stated earlier, another 16 bits of the handler address.
+    ;
+    ; These combined with bits 0-15 form the lower 32-bits of the handler address
+    ;
+    ; Bits 95-64: the remaining, upper 32-bits of the handler address.
+    ;
+    ; Lastly, bits 127-96: Reserved, all zero for our gate.
+    ;
+    ; Now then, let's construct the binary equivalent first before getting the hexadecimal
+    ; magic number for the gate.
+    ;
+    ; Bits: 127 to 96
+    ; 00000000000000000000000000000000 -> 0x0
+    ;
+    ; bits 95 to 48 all handler address, we can't populate at this comment writing stage.
+    ; bit 47 = 1
+    ; bits 46-45 = 00 -> 0x0
+    ; bit 44, reserved = 0 --> 0x0
+    ; bits 43-40, gate type = 1110 (0xE), interrupt gate.
+    ; bits 39 to 35, reserved = 00000 --> 0x0
+    ; bits 34 to 32, IST, currently: 000 --> 0x0
+    ; bits 31 to 16, segment selector, we need: 0x08 (1000 in binary)
+    ; bits 15 to 0: handler address, unknown at this stage.
+
+    ; so now we calculate and load the effective address of .timer_interrupt_handler
+
+    lea rax, [rel .timer_interrupt_handler]
+
+    ; this gives us: rax = 0xffffffff80001383 (discovered from the gdb trace)
+    ; This address is will stay the same for now since:
+    ; And unlike something such as a runtime heap address,
+    ; this address will normally remain the same across runs of the same kernel binary.
+    ; The kernel isn't using ASLR/KASLR at this stage, so the linker has placed the
+    ; function at a deterministic virtual address. It can change if I later, change
+    ; the binary's layout, add/remove code, change the linker script, etc.
+    ;
+    ; However since I don't want to hardcode that address, we will instead mathematically
+    ; split rax into 3 16-bit pieces then mathematically construct the IDT gate magic number.
+    ;
+    ; let's extract the lowest 16 bits from rax first, i.e bits 15 to 0
+
+    ; first we store the original address in rdi
+    mov rdi, rax
+    mov bx, ax ; bx now has bits 15 to 0.
+
+    ; next we need the next 16 bits, for bits 63 to 48.
+    ; so we shift out the lowest 16 bits which we don't need now.
+
+    shr rax, 16
+    mov cx, ax ; now we have bits 63 to 48 to in cx
+
+    ; now rax has the remaining upper 32 bits that would fill up bits 95 to 64.
+    ; we would query eax to get those 32 bits.
+
+    ; now we gotta pack them bits into one single magic number.
+    ;
+    ; currently our magic numbers is:
+    ;
+    ; 00000000000000000000000000000000<-bits 95 to 48 (32 bit) gap-->10001110000000001000<--remaining 16 bits of the handler address-->
+    ; leaving aside the handler address bits, this would be our magic number's constant parts every time for this IDT's IRQ0 timer intterupt gate initialization.
+    ; for the discovered hex address of .timer_interrupt_handler, the binary equivalent is:
+    ; 1111111111111111111111111111111110000000000000000001001110000011
+    ;
+    ; lower 16 bits, (bits 15-0): 0001001110000011
+    ; next 16 bits (bits 63-48): 1000000000000000
+    ; remaining upper 32 bits (bits 95-64): 11111111111111111111111111111111
+
+    ; so our final magic number, for this address would look like:
+    ; 00000000000000000000000000000000111111111111111111111111111111111000000000000000100011100000000010000001001110000011
+    ; or FFFFFFFF80008E0081383 in hexadecimal
+    ; or 0x00000000FFFFFFFF80008E0000081383.
+    ;
+    ; however we are not going to assume that the handler address will never change in future, so we will not hardcode this number.
+
+    ; BX  = handler bits 15:0
+    ; CX  = handler bits 31:16
+    ; EAX = handler bits 63:32
+
+    ; -------------------------
+    ; Construct low 64 bits
+    ; -------------------------
+
+    movzx rbx, bx              ; zero extend the bits up to 64 bits.
+
+    movzx rcx, cx
+    shl rcx, 48                ; bits 63:48
+    or rbx, rcx                ; we already know from earlier back in sys_plot_pixel that this is a bitwise OR.
+
+    mov rcx, 0x08              ; our kernel code descriptor address.
+    shl rcx, 16                ; segment selector --> bits 31:16
+    or rbx, rcx
+
+    mov rcx, 0x8E
+    shl rcx, 40                ; gate attributes --> bits 47:40
+    or rbx, rcx
+
+    ; -------------------------
+    ; Construct high 64 bits
+    ; -------------------------
+
+    mov edx, eax               ; handler bits 63:32 -> gate bits 95:64
+
+    ; bits 127:96 remain zero
+    ; so for our current handler address:
+    ; rbx = 0x80008E0000081383
+    ; rdx = 0x00000000FFFFFFFF
+
+    ; now we can actually put the gate into the IDT:
+    ; let me do a quick gdb test run before this.
+    ; (gdb) orion-dump regs
+    ; -- registers --
+    ;   rax    = 0x0000ffffffff8000
+    ;  rbx    = 0x80008e00000813bd
+    ;  rcx    = 0x00008e0000000000
+    ;  rdx    = 0x00000000ffff8000
+    ;  rsi    = 0x0000000000000000
+    ;  rdi    = 0xffffffff800013bd
+    ;  rbp    = 0x0000000000000000
+    ;  rsp    = 0xffff800007f95ff0
+    ;  r8     = 0x0000000000000000
+    ;  r9     = 0x0000000000000000
+    ;  r10    = 0x0000000000000000
+    ;  r11    = 0x0000000000000000
+    ;  r12    = 0x0000000000000000
+    ;  r13    = 0x0000000000000000
+    ;  r14    = 0x0000000000000000
+    ;  r15    = 0x0000000000000000
+    ;  ax     = 0xffffffffffff8000
+    ;  al     = 0x0000000000000000
+    ;  bx     = 0x00000000000013bd
+    ;  bl     = 0xffffffffffffffbd
+    ;  dx     = 0xffffffffffff8000
+    ;  dl     = 0x0000000000000000
+    ;  cx     = 0x0000000000000000
+    ;  cl     = 0x0000000000000000
+    ; cs     = 0x0000000000000008
+    ;  ds     = 0x0000000000000010
+    ;  es     = 0x0000000000000010
+    ;  ss     = 0x0000000000000010
+
+    ; the gdb dump shows us that:
+    ; rbx and rdx are just as what we expected.
+    ; so our 128-bit IDT entry magic number is split between two 64 bit halves.
+    ; the upper 32-bit half of the handler address can be derived from :
+    mov rdx, rdi
+    shr rdx, 32
+
+    ; gdb should show :
+    ; rdx = 0x00000000ffffffff
+    ; and yep, the gdb trace shows
+    ; 0xffffffff800013c3 in setup_hardware ()
+    ; (gdb) orion-dump regs
+    ; -- registers --
+    ;   rax    = 0x0000ffffffff8000
+    ;   rbx    = 0x80008e00000813c4
+    ;   rcx    = 0x00008e0000000000
+    ;   rdx    = 0x00000000ffffffff
+    ;   rsi    = 0x0000000000000000
+    ;   rdi    = 0xffffffff800013c4
+    ;   rbp    = 0x0000000000000000
+    ;   rsp    = 0xffff800007f95ff0
+    ;   r8     = 0x0000000000000000
+    ;   r9     = 0x0000000000000000
+    ;   r10    = 0x0000000000000000
+    ;   r11    = 0x0000000000000000
+    ;   r12    = 0x0000000000000000
+    ;   r13    = 0x0000000000000000
+    ;   r14    = 0x0000000000000000
+    ;   r15    = 0x0000000000000000
+    ;   ax     = 0xffffffffffff8000
+    ;   al     = 0x0000000000000000
+    ;   bx     = 0x00000000000013c4
+    ;   bl     = 0xffffffffffffffc4
+    ;   dx     = 0xffffffffffffffff
+    ;   dl     = 0xffffffffffffffff
+    ;   cx     = 0x0000000000000000
+    ;   cl     = 0x0000000000000000
+    ;   cs     = 0x0000000000000008
+    ;   ds     = 0x0000000000000010
+    ;   es     = 0x0000000000000010
+    ;   ss     = 0x0000000000000010
+
+    ; So the complete gate is:
+    ; HIGH 64 bits
+    ; 0x00000000FFFFFFFF
+    ;
+    ; LOW 64 bits
+    ; 0x80008E00000813C4
+
+    ; or, laid out as the 16-byte gate:
+    ; +----------------------+----------------------+
+    ; | 0x00000000FFFFFFFF   | 0x80008E00000813C4   |
+    ; +----------------------+----------------------+
+    ;         high qword              low qword
+
+    ; now we can safely write the gate into the IDT
+
+    mov [idt + 0x200], rbx ; lower 64 bits
+    mov [idt + 0x208], rdx ; upper 64 bits
+
+    ; now we tell the CPU where to look for the IDT descriptor via lidt
+
+    lidt [idt_descriptor]
+
+    ret
+
+.timer_interrupt_handler:
+    ; timer tick occurred
+    ; we need to tell the master PIC that an interrupt has been handled
+    ; and that it may receive another one
+    ; we do that by sending an EOI --> End Of Interrupt signal to the master PIC
+    ; The EOI signal is 0x20.
+    ; however this signal must be sent to the command port of the master PIC
+    ; as writing 0x20 to the data port will modify the IMR instead.
+
+    ; this will tell sys_delay that yes, a timer tick has occurred.
+    push rax ; save rax to stack, since it gets clobbered later
+    inc qword [rel timer_ticks] ; increment the timer tick variable by 1
+    mov al, 0x20
+    out 0x20, al
+    ; retrive rax from stack
+    pop rax
+
+    iretq ; we use iretq since the CPU pushes it's own interrupt-return state onto the stack
+          ; and the when the interrupt arrives iretq restores the state.
+
 sys_exit:
     cli
 
@@ -619,6 +1777,72 @@ no_response:
     jmp sys_exit
 
 _start:
+
+    ; Orion kernel initialization, load the gdt descriptor.
+    ; the lgdt operation tells the CPU where to look for the GDT.
+    lgdt [gdt_descriptor] ; very very important
+
+    ; next up we need to load the kernel code segment and kernel data segment
+    ; only the kernel code and data segment since we are in ring 0 for now
+    ; we will load user code and data segment when we do a privilege transition later.
+
+    ; so, the code segment lives in the cs register.
+    ; but we cannot just do mov cs, 0x08 since the cs register is special
+    ; so we use a far jump instead.
+    ; The cs register is special because changing it is not merely changing where data
+    ; accesses come from; it changes the CPU's current execution context.
+    ; A far jump loads both:
+    ; cs --> 0x08
+    ; RIP --> address of .reload_cs (where then we will load the kernel data segment)
+    ; into registers ds, es, and ss
+    ; jmp 0x08:.reload_cs ; that's a far jump.
+    ; oookayyy turns out that a far jump is NOT supported in 64-bit long mode.
+    ; So we gotta take the long way here.
+
+    ; load 0x08 onto cs
+    push 0x08 ; at this point it's RSP --> 0x08
+    ; calculate and load the effective address of .reload_cs onto rax
+    lea rax, [rel .reload_cs] ; rel tells NASM to do rip relative addressing
+    push rax ; push rax on the stack
+
+    ; at this stage the stack is:
+    ; 0x08
+    ; rax ---> RIP
+    ;
+    ; Normally people like to visualize the stack bottom-up
+    ; but stack actually growns downward.
+
+    ; retf is far return.
+    retfq ; far return in 64-bit mode
+
+    ; performs:
+    ; RIP --> RSP ; address of .reload_cs
+    ; cs --> [RSP + 8] (0x08)
+
+.reload_cs:
+    ; Load Orion's kernel data segment
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+
+    ; setup the hardware
+
+    call setup_hardware
+
+    ; initialize kernel timer state
+    ; technically redundant since it's already defined in .data
+    ; but I will keep the explicit initialization nonetheless.
+    mov qword [rel timer_ticks], 0
+
+    sti ; set the interrupt flag
+    ; now execution will happen in Orion's GDT, in ring 0.
+    ; proceed as usual.
+    jmp .kernel_main
+
+
+.kernel_main:
+
     ; Orion's systemcalls
 
     ; query bootloader info
@@ -643,7 +1867,32 @@ _start:
     mov rsi, -1 ; color mode, should default to white for now.
     call syscall_dispatch
 
+    ; let's call a delay for 5 seconds.
+    mov rax, 7
+    mov rbx, 2
+    call syscall_dispatch
+
+    ; clear the screen
     mov rax, 6
+    call syscall_dispatch
+
+    ; let's call a delay for 2 seconds.
+    mov rax, 7
+    mov rbx, 5
+    call syscall_dispatch
+
+    ; re-compute the coordinates of the center of the screen
+    mov rax, 2
+    mov rbx, orion_hello_message_length
+    call syscall_dispatch
+
+    ; now let's print the creator name on the screen
+    mov rax, 4
+    mov rbx, orion_creator_name
+    mov rcx, orion_creator_name_length
+    mov rdx, [pen_x] ; computed from syscall 2
+    mov rdi, [pen_y] ; computed from syscall 2
+    mov rsi, 1 ; color mode, should default to white for now.
     call syscall_dispatch
 
     ; sys_exit
