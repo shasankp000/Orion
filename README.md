@@ -99,14 +99,14 @@ The dispatcher performs a simple table lookup:
 RAX
  │
  │ syscall number
- ▼
+ V
 bounds check
  │
- ▼
+ V
 syscall_table[ RAX ]
  │
  │ function address
- ▼
+ V
 JMP to syscall
 ```
 
