@@ -80,6 +80,7 @@ section .bss
 
     ; Kernel stack pointer stuff, for IST.
     ; Since we are only in a single core:
+    alignb 16 ; works the same as align but is used for sections like .bss which dont's store any actual bytes in the binary.
     kernel_stack0:
         resb 4096
     kernel_stack0_top:
@@ -105,6 +106,10 @@ section .bss
     ;
     ; Now as for what exceptions each IST stack can be designated to, that's our own convetion, and can be
     ; decided upon, later.
+    alignb 16
+    ist1_stack:
+        resb 5120 ; reserve 5KiB of memory
+    ist1_stack_top:
 
 section .rodata
     ; This section contains read-only data.
@@ -1429,7 +1434,7 @@ setup_legacy_8259_PIC:
 
     ret
 
-setup_IDT:
+setup_IDT_TIMER_GATE:
     ; now we have to interact with the IDT which the CPU uses to convert the interrupt vector
     ; to an IDT request, so we need to map that to a timer interrupt handler method
     ; this timer interrupt handler will call actual code to wake up the CPU from a halted state.
@@ -1461,9 +1466,9 @@ setup_IDT:
     ; └----------------------------─┴─---------------------------─┘
     ;
     ; 63                          48 47   46  45  44    40 39      32
-    ; ┌-----------------------------┬---┬-----┬---┬------┬----------┐
-    ; |      Offset 31:16           │ P | DPL | 0 | Type |    IST   |
-    ; └-----------------------------┴---┴-----┴---┴------┴----------┘
+    ; ┌-----------------------------┬---┬-----┬----------┬------┬----------┐
+    ; |      Offset 31:16           │ P | DPL | Reserved | Type |    IST   |
+    ; └-----------------------------┴---┴-----┴----------┴------┴----------┘
     ;
     ; 31                          16 15                           0
     ; ┌-----------------------------┬-----------------------------┐
@@ -1519,9 +1524,9 @@ setup_IDT:
     ; A non-zero value of this will tell the CPU to switch to the corresponding stack defined by the
     ; Task State Segment (TSS)
     ;
-    ; But since Orion doesn't have a TSS/IST (yet, but it will, soon)
+    ; But since Orion has a TSS, the interrupt gate will not use the IST regardless
     ;
-    ; For we now, we keep bits 34-32 = 000.
+    ; For we now, we keep bits 34-32 = 000, CPU continues using the current stack
     ;
     ; Bits 39 to 35, reserved. We cannot assign anything there
     ;
@@ -1784,10 +1789,6 @@ setup_IDT:
     mov [idt + 0x200], rbx ; lower 64 bits
     mov [idt + 0x208], rdx ; upper 64 bits
 
-    ; now we tell the CPU where to look for the IDT descriptor via lidt
-
-    lidt [idt_descriptor]
-
     ret
 
 .timer_interrupt_handler:
@@ -1809,6 +1810,97 @@ setup_IDT:
 
     iretq ; we use iretq since the CPU pushes it's own interrupt-return state onto the stack
             ; and the when the interrupt arrives iretq restores the state.
+
+setup_IDT_DE_GATE:
+    ; Divide by zero exception IST stack linking to IDT setup.
+
+    ; all registers free to use after previous setup.
+
+    lea rax, [rel .divide_by_zero_exception_handler]
+
+    ; now I will just copy and paste my earlier code that handles the bit splitting and merging to construct the IDT gate.
+    ; and I don't think I will explain the process again since I already have done so in detail above in setup_IDT_TIMER_GATE and doing so again will be redundant
+    ; and expand the length of the subroutine even more.
+
+    ; let's extract the lowest 16 bits from rax first, i.e bits 15 to 0
+
+    ; first we store the original address in rdi
+    mov rdi, rax
+    mov bx, ax ; bx now has bits 15 to 0.
+
+    ; next we need the next 16 bits, for bits 63 to 48.
+    ; so we shift out the lowest 16 bits which we don't need now.
+
+    shr rax, 16
+    mov cx, ax ; now we have bits 63 to 48 to in cx
+
+    ; BX  = handler bits 15:0
+    ; CX  = handler bits 31:16
+    ; EAX = handler bits 63:32
+
+    ; -------------------------
+    ; Construct low 64 bits
+    ; -------------------------
+
+    movzx rbx, bx              ; zero extend the bits up to 64 bits.
+
+    movzx rcx, cx
+    shl rcx, 48                ; bits 63:48
+    or rbx, rcx                ; we already know from earlier back in sys_plot_pixel that this is a bitwise OR.
+
+    mov rcx, 0x08              ; our kernel code descriptor address.
+    shl rcx, 16                ; segment selector --> bits 31:16
+    or rbx, rcx
+
+    mov rcx, 0x8E
+    shl rcx, 40                ; gate attributes --> bits 47:40
+    or rbx, rcx
+
+    ; -------------------------
+    ; Construct high 64 bits
+    ; -------------------------
+
+    mov edx, eax               ; handler bits 63:32 -> gate bits 95:64
+
+    ; so our 128-bit IDT entry magic number is split between two 64 bit halves.
+    ; the upper 32-bit half of the handler address can be derived from :
+    mov rdx, rdi
+    shr rdx, 32
+
+    ; now we can safely write the gate into the IDT
+    ; rbx has the lower 64 bits
+    ; rdx has the upper 64 bits
+
+    ; the only thing that changes here is the idt offset.
+    ; since the offset for IST1 is 0, it will be 0x00
+    mov [idt + 0x000], rbx ; lower 64 bits
+    mov [idt + 0x008], rdx ; upper 64 bits
+
+    ret
+
+.divide_by_zero_exception_handler:
+    ; DE handler.
+    ; no error code pushed by CPU for this vector
+    ; no PIC handling here either, so no EOI needed.
+
+    cli ; clear interrupt flag
+    hlt ; halt the CPU.
+
+setup_IDT:
+    ; This subroutine was getting too long, so I divided the parts into their own
+    ; dedicated subroutines.
+
+    ; IDT Timer gate setup:
+    call setup_IDT_TIMER_GATE
+
+    ; DE IDT gate setup
+    call setup_IDT_DE_GATE
+
+    ; now we tell the CPU where to look for the IDT descriptor via lidt
+
+    lidt [idt_descriptor]
+
+    ret
 
 setup_legacy_hardware:
 
@@ -2015,6 +2107,10 @@ setup_tss_descriptor:
 
     ; initialize the iomap_base
     mov word [rel tss64 + TSS_IOMAP_BASE], TSS_SIZE ; the iomap base's offset points beyond the end of the tss.
+
+    ; initialize the IST1 stack pointer
+    lea rbx, [rel ist1_stack_top]
+    mov qword [rel tss64 + TSS_IST1], rbx
 
     mov ax, TSS_SELECTOR ; since ltr doesn't take an immediate offset constant, so we need 16-bit register/memory operand containing a selector.
     ltr ax ; tells the CPU to take 0x28, and then to interpret it as a selector for the task register, hence ltr.

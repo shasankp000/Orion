@@ -38,7 +38,7 @@
 
 ### CPU Exceptions
 
-- [ ] Divide-by-zero
+- [x] Divide-by-zero
 - [ ] Debug exception
 - [ ] Breakpoint
 - [ ] Invalid opcode
