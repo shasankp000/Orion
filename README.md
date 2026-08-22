@@ -126,7 +126,7 @@ number and jumps directly to the implementation.
 
 # Currently usable syscalls
 
-| # | Name | Arguments | Description |
+| # (RAX)| Name | Arguments | Description |
 |---:|---|---|---|
 | 0 | `sys_query_limine_bootloader_info` | None | Queries Limine for the bootloader's name, version, and revision. Populates `bootloader_name`, `bootloader_version`, and `bootloader_revision`. |
 | 1 | `sys_query_limine_framebuffer` | None | Queries Limine for the first framebuffer and extracts its address, dimensions, pitch, bpp, and colour-channel mask/shift information into Orion's framebuffer state. |

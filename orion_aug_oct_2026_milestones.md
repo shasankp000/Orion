@@ -29,7 +29,7 @@
 ### IDT
 
 - [x] Finalize IDT structure
-- [ ] Configure IDTR
+- [x] Configure IDTR
 - [x] Implement interrupt gate representation
 - [ ] Implement generic IDT entry installation
 - [ ] Implement assembly interrupt entry mechanism
