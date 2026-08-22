@@ -11,7 +11,7 @@
 - [x] Verify the TSS descriptor and contents in GDB
 - [x] Verify the CPU accepts the TSS
 - [x] Verify the kernel stack mechanism associated with the TSS
-- [ ] Commit a clean, verified implementation
+- [x] Commit a clean, verified implementation
 
 **Milestone:** Orion has a verified x86-64 TSS implementation.
 
