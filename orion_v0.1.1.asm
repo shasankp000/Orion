@@ -2013,6 +2013,9 @@ setup_tss_descriptor:
     mov qword [rel gdt + 0x28], rsi
     mov qword [rel gdt + 0x30], rax
 
+    ; initialize the iomap_base
+    mov word [rel tss64 + TSS_IOMAP_BASE], TSS_SIZE ; the iomap base's offset points beyond the end of the tss.
+
     mov ax, TSS_SELECTOR ; since ltr doesn't take an immediate offset constant, so we need 16-bit register/memory operand containing a selector.
     ltr ax ; tells the CPU to take 0x28, and then to interpret it as a selector for the task register, hence ltr.
     ; we need not load 0x30 since the CPU will already use this selector and access the upper 64-bit half of the TSS descriptor at 0x30
@@ -2108,9 +2111,6 @@ _start:
     mov qword [rel timer_ticks], 0
 
     call setup_kernel_stack
-
-    ; initialize the iomap_base
-    mov word [rel tss64 + TSS_IOMAP_BASE], TSS_SIZE ; the iomap base's offset points beyond the end of the tss.
 
     call setup_tss_descriptor
 
