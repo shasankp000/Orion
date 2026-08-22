@@ -36,6 +36,8 @@ Current milestones include:
 -   A global kernel timer tick counter
 -   `sys_delay`, implemented using timer ticks
 -   Interrupts enabled with `sti`
+-   An Orion-owned 64-bit TSS (Task State Segment), loaded via `ltr`
+-   A dedicated Ring 0 kernel stack (`RSP0`) wired into the TSS
 -   A complete boot path from Limine entry through Orion's kernel setup
     and `kernel_main`
 
@@ -46,14 +48,15 @@ The current kernel can:
 3.  Reload the kernel code/data segments.
 4.  Configure the PIT and PIC.
 5.  Construct and load Orion's IDT.
-6.  Enable interrupts.
-7.  Receive timer IRQ0 interrupts.
-8.  Increment a kernel-owned timer counter.
-9.  Use that counter to implement a blocking delay syscall.
-10. Query the framebuffer and render text.
-11. Clear the framebuffer.
-12. Continue executing after the delay and render another message.
-13. Halt cleanly through `sys_exit`.
+6.  Construct and load Orion's TSS, including a dedicated Ring 0 stack.
+7.  Enable interrupts.
+8.  Receive timer IRQ0 interrupts.
+9.  Increment a kernel-owned timer counter.
+10. Use that counter to implement a blocking delay syscall.
+11. Query the framebuffer and render text.
+12. Clear the framebuffer.
+13. Continue executing after the delay and render another message.
+14. Halt cleanly through `sys_exit`.
 
 The current source is intentionally heavily commented. The comments are
 part of the learning process and document the reasoning behind the
@@ -220,6 +223,15 @@ The current kernel descriptors are:
 |  `0x10`  |   Kernel data     |   Ring 0 |
 |  `0x18`  |   User code       |   Ring 3 (prepared for future userspace) |
 |  `0x20`  |   User data       |   Ring 3 (prepared for future userspace) |
+|  `0x28`  |   TSS descriptor (lower 64 bits)  |   System |
+|  `0x30`  |   TSS descriptor (upper 64 bits)  |   System |
+
+Entries 5 and 6 together form the single 16-byte TSS system descriptor
+required in 64-bit long mode (unlike code/data descriptors, a TSS
+descriptor does not fit in 8 bytes once the full 64-bit base address is
+included). The selector used with `ltr` is `0x28`; the CPU automatically
+consults `0x30` for the upper half of the base address and does not need
+to be loaded separately.
 
 The GDT is loaded through its GDTR structure using `lgdt`.
 
@@ -289,6 +301,92 @@ This distinction was important during implementation because an
 incorrectly sized descriptor caused the CPU to load an invalid IDT base
 and resulted in a boot loop/triple-fault path once interrupts were
 enabled.
+
+------------------------------------------------------------------------
+
+# TSS (Task State Segment)
+
+Orion now owns a 64-bit TSS, defined in its own file (`tss.inc`) rather
+than inline with the GDT, in anticipation of per-CPU TSSes once SMP is
+introduced.
+
+In 64-bit long mode the TSS is not used for hardware task switching.
+Orion uses it for two purposes:
+
+-   Providing `RSP0`, the stack pointer the CPU loads automatically on a
+    Ring 3 → Ring 0 transition (prepared now even though Ring 3 is not
+    yet active).
+-   Providing IST (Interrupt Stack Table) entries — dedicated stacks for
+    specific interrupts/exceptions, independent of whatever stack was in
+    use when the interrupt occurred. IST stacks are not yet wired to any
+    interrupt vector.
+
+The struct layout:
+
+``` text
+0x00  reserved0    4 bytes
+0x04  rsp0         8 bytes
+0x0C  rsp1         8 bytes
+0x14  rsp2         8 bytes
+0x1C  reserved1    8 bytes
+0x24  ist1..ist7   8 bytes each
+0x5C  reserved2    8 bytes
+0x64  reserved3    2 bytes
+0x66  iomap_base   2 bytes
+0x68  END (total size = 104 bytes)
+```
+
+Field offsets are computed via label arithmetic (`tss64_field - tss64`)
+rather than hardcoded, so the struct can grow without every dependent
+constant needing to be manually recalculated.
+
+## TSS descriptor
+
+Unlike code/data descriptors, a TSS descriptor is a 16-byte system
+descriptor in long mode, since it must encode a full 64-bit base
+address. It occupies two consecutive GDT entries (`0x28`/`0x30`, see the
+GDT section above).
+
+## Initialization order
+
+TSS fields are fully populated before the TSS is made "live" via `ltr`,
+and interrupts are only enabled after `ltr` completes:
+
+``` text
+setup_kernel_stack       (populate RSP0)
+        │
+        V
+setup_tss_descriptor
+        │
+        ├── populate iomap_base
+        └── ltr             (load task register)
+        │
+        V
+sti
+```
+
+This ordering matters: if `ltr` executed before `RSP0`/`iomap_base` were
+populated, or if `sti` executed before `ltr`, the CPU could consult
+TSS state before it was valid.
+
+`RSP0` points at a statically reserved 4KB kernel stack
+(`kernel_stack0` / `kernel_stack0_top`), since Orion has no dynamic
+allocator yet.
+
+`iomap_base` is set at runtime to `TSS_SIZE` (`0x68`), which tells the
+CPU the I/O permission bitmap starts beyond the end of the TSS — i.e.
+there is currently no I/O bitmap. This is computed from `TSS_SIZE`
+rather than hardcoded, so it stays correct if the struct layout ever
+changes.
+
+## Status
+
+-   TSS struct, descriptor, and `ltr` load: implemented and verified.
+-   `RSP0`: populated and verified.
+-   `iomap_base`: populated and verified.
+-   `IST1` and a routed double-fault (`#DF`, vector 8) IDT gate: not
+    yet implemented. IST is therefore defined but not yet exercised by
+    an actual interrupt.
 
 ------------------------------------------------------------------------
 
@@ -521,6 +619,12 @@ setup_hardware
 initialize timer_ticks
   │
   V
+setup_kernel_stack (populate TSS RSP0)
+  │
+  V
+setup_tss_descriptor (populate iomap_base, ltr)
+  │
+  V
 sti
   │
   V
@@ -604,6 +708,8 @@ Examples of things currently verified through GDB include:
 -   `timer_ticks` advancing while `sys_delay` loops
 -   syscall dispatch and syscall transitions
 -   framebuffer memory contents
+-   Task Register (`TR`) contents after `ltr`
+-   TSS `RSP0` and `iomap_base` field values after initialization
 
 The timer subsystem was specifically debugged by placing a breakpoint
 directly on:
@@ -640,6 +746,8 @@ The roadmap is deliberately evolutionary rather than a rigid checklist.
 
 Broad areas ahead include:
 
+-   Wire an IST1 stack to a routed double-fault (`#DF`, vector 8) IDT
+    gate, completing the IST half of the TSS work.
 -   Expand hardware abstraction.
 -   Improve interrupt/exception handling.
 -   Expand syscall facilities.
