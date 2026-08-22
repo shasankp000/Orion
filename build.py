@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent
 ORION_VERSION = "v0.1.1"
 
 SOURCE = ROOT / ("orion_" + ORION_VERSION + ".asm")
-OBJECT = ROOT / ("orion_" + ORION_VERSION + ".0")
+OBJECT = ROOT / ("orion_" + ORION_VERSION + ".o")
 ELF = ROOT / ("orion_" + ORION_VERSION + ".elf")
 LINKER = ROOT / "linker.ld"
 
@@ -20,11 +20,35 @@ ISO_ROOT = ROOT / "iso_root"
 ISO = ROOT / ("orion_" + ORION_VERSION + ".iso")
 
 LIMINE_DATA = Path("/usr/share/limine")
+LIMINE_CONF = ISO_ROOT / "boot" / "limine" / "limine.conf"
 
 
 def run(command):
     print(f"\n$ {' '.join(map(str, command))}")
     subprocess.run(command, check=True)
+
+
+def write_limine_conf():
+    """
+    Generate limine.conf from scratch each build, driven entirely by
+    ORION_VERSION. This avoids any drift between the source .asm/.elf
+    naming and what Limine actually boots.
+    """
+
+    kernel_elf_name = "orion_" + ORION_VERSION + ".elf"
+
+    conf_contents = (
+        "timeout: 5\n"
+        "\n"
+        "/Orion\n"
+        "    protocol: limine\n"
+        f"    kernel_path: boot():/boot/{kernel_elf_name}\n"
+    )
+
+    LIMINE_CONF.parent.mkdir(parents=True, exist_ok=True)
+    LIMINE_CONF.write_text(conf_contents)
+
+    print(f"\nWrote {LIMINE_CONF} (kernel_path -> {kernel_elf_name})")
 
 
 def main():
@@ -99,6 +123,13 @@ def main():
         LIMINE_DATA / "BOOTX64.EFI",
         ISO_ROOT / "EFI" / "BOOT" / "BOOTX64.EFI"
     )
+
+
+    # ---------------------------------------------------------
+    # 5b. Regenerate limine.conf for current ORION_VERSION
+    # ---------------------------------------------------------
+
+    write_limine_conf()
 
 
     # ---------------------------------------------------------

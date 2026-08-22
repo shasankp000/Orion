@@ -132,6 +132,9 @@ section .rodata
     orion_creation_date db "Created on: 15/08/2026", 10
     orion_creation_date_length equ $ - orion_creation_date
 
+    orion_breakpoint_exception_message db "Breakpoint hit!", 10
+    orion_breakpoint_exception_message_length equ $ - orion_breakpoint_exception_message
+
     ; Timer configuration
     PIT_FREQUENCY       equ 1193182
     PIT_DIVISOR         equ 0x2E9B
@@ -1812,7 +1815,8 @@ setup_IDT_TIMER_GATE:
             ; and the when the interrupt arrives iretq restores the state.
 
 setup_IDT_DE_GATE:
-    ; Divide by zero exception IST stack linking to IDT setup.
+    ; Divide by zero exception IDT gate setup.
+    ; No IST stack needed.
 
     ; all registers free to use after previous setup.
 
@@ -1872,7 +1876,7 @@ setup_IDT_DE_GATE:
     ; rdx has the upper 64 bits
 
     ; the only thing that changes here is the idt offset.
-    ; since the offset for IST1 is 0, it will be 0x00
+    ; vector 1 (#DE) -> idt + 0*16 = 0x000
     mov [idt + 0x000], rbx ; lower 64 bits
     mov [idt + 0x008], rdx ; upper 64 bits
 
@@ -1886,6 +1890,132 @@ setup_IDT_DE_GATE:
     cli ; clear interrupt flag
     hlt ; halt the CPU.
 
+setup_IDT_BP_GATE:
+    ; Breakpoint exception handling setup
+    ; No IST stack needed.
+
+    ; all registers free to use after previous setup.
+
+    lea rax, [rel .breakpoint_exception_handler]
+
+    ; now I will just copy and paste my earlier code that handles the bit splitting and merging to construct the IDT gate.
+    ; and I don't think I will explain the process again since I already have done so in detail above in setup_IDT_TIMER_GATE and doing so again will be redundant
+    ; and expand the length of the subroutine even more.
+
+    ; let's extract the lowest 16 bits from rax first, i.e bits 15 to 0
+
+    ; first we store the original address in rdi
+    mov rdi, rax
+    mov bx, ax ; bx now has bits 15 to 0.
+
+    ; next we need the next 16 bits, for bits 63 to 48.
+    ; so we shift out the lowest 16 bits which we don't need now.
+
+    shr rax, 16
+    mov cx, ax ; now we have bits 63 to 48 to in cx
+
+    ; BX  = handler bits 15:0
+    ; CX  = handler bits 31:16
+    ; EAX = handler bits 63:32
+
+    ; -------------------------
+    ; Construct low 64 bits
+    ; -------------------------
+
+    movzx rbx, bx              ; zero extend the bits up to 64 bits.
+
+    movzx rcx, cx
+    shl rcx, 48                ; bits 63:48
+    or rbx, rcx                ; we already know from earlier back in sys_plot_pixel that this is a bitwise OR.
+
+    mov rcx, 0x08              ; our kernel code descriptor address.
+    shl rcx, 16                ; segment selector --> bits 31:16
+    or rbx, rcx
+
+    mov rcx, 0x8F              ; Type bits changed to 1111, for trap gate.
+    shl rcx, 40                ; gate attributes --> bits 47:40
+    or rbx, rcx
+
+    ; -------------------------
+    ; Construct high 64 bits
+    ; -------------------------
+
+    mov edx, eax               ; handler bits 63:32 -> gate bits 95:64
+
+    ; so our 128-bit IDT entry magic number is split between two 64 bit halves.
+    ; the upper 32-bit half of the handler address can be derived from :
+    mov rdx, rdi
+    shr rdx, 32
+
+    ; now we can safely write the gate into the IDT
+    ; rbx has the lower 64 bits
+    ; rdx has the upper 64 bits
+
+    ; the only thing that changes here is the idt offset.
+    ; vector 3 (#BP) -> idt + 3*16 = 0x030
+    mov [idt + 0x030], rbx ; lower 64 bits
+    mov [idt + 0x038], rdx ; upper 64 bits
+
+    ret
+
+.breakpoint_exception_handler:
+    ; #BP -- breakpoint (int3)
+    ; no error code pushed by the CPU for this vector
+    ; unlike #DE, this is meant to be recoverable - execution resumes after the breakpoint
+
+    ; for testing purposes:
+    ; maybe do a simple print("Breakpoint hit") ?
+    ; do a sys_print_ASCII_string syscall
+    ; first, we preserve the registers since breakpoint can be hit at any point.
+
+    ; push rax
+    ; push rbx
+    ; push rcx
+    ; push rdx
+    ; push rdi
+    ; push rsi
+
+    ; compute the coordinates of the center of the screen
+
+    ; mov rax, 2
+    ; mov rbx, orion_breakpoint_exception_message_length
+    ; call syscall_dispatch
+
+    ; print the hello message on the screen
+
+    ; mov rax, 4
+    ; mov rbx, orion_breakpoint_exception_message
+    ; mov rcx, orion_breakpoint_exception_message_length
+    ; mov rdx, [pen_x] ; computed from syscall 2
+    ; mov rdi, [pen_y] ; computed from syscall 2
+    ; mov rsi, -1 ; color mode, should default to white for now.
+    ; call syscall_dispatch
+
+    ; let's call a delay for 5 seconds.
+
+    ; mov rax, 7
+    ; mov rbx, 5
+    ; call syscall_dispatch
+
+    ; clear the screen
+
+    ; mov rax, 6
+    ; call syscall_dispatch
+
+    ; restore from stack
+
+    ; pop rsi
+    ; pop rdi
+    ; pop rdx
+    ; pop rcx
+    ; pop rbx
+    ; pop rax
+
+    ; all that was testing code for the breakpoint exception handler.
+    ; we actually don't want a 5 second delay whenever a breakpoint is it. nor do we want the framebuffer to print something.
+
+    iretq
+
 setup_IDT:
     ; This subroutine was getting too long, so I divided the parts into their own
     ; dedicated subroutines.
@@ -1895,6 +2025,10 @@ setup_IDT:
 
     ; DE IDT gate setup
     call setup_IDT_DE_GATE
+
+    ; BP IDT gate setup
+
+    call setup_IDT_BP_GATE
 
     ; now we tell the CPU where to look for the IDT descriptor via lidt
 
@@ -2228,6 +2362,9 @@ _start:
     mov rax, 1
     call syscall_dispatch
 
+    ; test breakpoint exception
+    ; int3 --> confirmed, it works.
+
     ; compute the coordinates of the center of the screen
     mov rax, 2
     mov rbx, orion_hello_message_length
@@ -2244,7 +2381,7 @@ _start:
 
     ; let's call a delay for 5 seconds.
     mov rax, 7
-    mov rbx, 2
+    mov rbx, 5
     call syscall_dispatch
 
     ; clear the screen
@@ -2253,7 +2390,7 @@ _start:
 
     ; let's call a delay for 2 seconds.
     mov rax, 7
-    mov rbx, 5
+    mov rbx, 2
     call syscall_dispatch
 
     ; re-compute the coordinates of the center of the screen

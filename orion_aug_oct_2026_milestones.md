@@ -31,7 +31,7 @@
 - [x] Finalize IDT structure
 - [x] Configure IDTR
 - [x] Implement interrupt gate representation
-- [ ] Implement generic IDT entry installation
+- [x] Implement generic IDT entry installation
 - [ ] Implement assembly interrupt entry mechanism
 - [ ] Design register-save frame
 - [x] Implement `iretq` return path
@@ -40,7 +40,7 @@
 
 - [x] Divide-by-zero
 - [ ] Debug exception
-- [ ] Breakpoint
+- [x] Breakpoint
 - [ ] Invalid opcode
 - [ ] General protection fault
 - [ ] Page fault
