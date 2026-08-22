@@ -27,9 +27,9 @@ import gdb
 TRACKED_REGISTERS = [
     "rax", "rbx", "rcx", "rdx",
     "rsi", "rdi", "rbp", "rsp",
-    "r8", "r9", "r10", "r11", "r12", "r13",
+    "r8", "r8d", "r8b", "r9", "r10", "r11", "r12", "r13",
     "r14", "r15", "ax", "al", "bx", "bl", "dx", "dl",
-    "cx", "cl", "cs", "ds", "es", "ss"
+    "cx", "cl", "di", "dil", "cs", "ds", "es", "ss"
 ]
 
 # ---------------------------------------------------------------------

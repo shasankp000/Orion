@@ -4,6 +4,7 @@
 default rel;
 
 %include "fonts/font8x8_basic.inc"
+%include "./tss.inc"
 
 section .limine_info_request
     ; limine requests will be here.
@@ -77,14 +78,42 @@ section .bss
     pen_x resb 8
     pen_y resb 8
 
+    ; Kernel stack pointer stuff, for IST.
+    ; Since we are only in a single core:
+    kernel_stack0:
+        resb 4096
+    kernel_stack0_top:
+
+    ; This will give us:
+    ;   kernel_stack
+    ;         |
+    ;         V
+    ;   ┌------------------┐
+    ;   |                  |
+    ;   |    4096 bytes    |
+    ;   |                  |
+    ;   └------------------┘
+    ;                      ^
+    ;                      |
+    ;                kernel_stack_top
+
+    ; Since x86-64 stacks grow downward,
+    ; kernel_stack_top is what we eventually want in:
+    ; tss64.rsp0, the ring 0 stack pointer. gate (from the IDT we configured earlier) can say:
+    ;
+    ; (for IST = 1), When this particular interrupt/trap occurs, switch to TSS.IST1.
+    ;
+    ; Now as for what exceptions each IST stack can be designated to, that's our own convetion, and can be
+    ; decided upon, later.
+
 section .rodata
     ; This section contains read-only data.
 
     ; "describe bytes", for NASM, gives us these 4 choices
-    ; db    define byte       -> 8 bits
-    ; dw    define word       -> 16 bits
-    ; dd    define doubleword -> 32 bits
-    ; dq    define quadword   -> 64 bits
+    ; db    define byte       -> 8 bits (1 byte)
+    ; dw    define word       -> 16 bits (2 bytes)
+    ; dd    define doubleword -> 32 bits (4 bytes)
+    ; dq    define quadword   -> 64 bits (8 bytes)
 
     orion_kernel_version db "version: 0.1.1", 10
     orion_kernel_version_length equ $ - orion_kernel_version
@@ -118,6 +147,12 @@ section .rodata
 
 section .data
     ; writeable data section
+
+    ; "describe bytes", for NASM, gives us these 4 choices
+    ; db    define byte       -> 8 bits (1 byte)
+    ; dw    define word       -> 16 bits (2 bytes)
+    ; dd    define doubleword -> 32 bits (4 bytes)
+    ; dq    define quadword   -> 64 bits (8 bytes)
 
     ; Orion's Global Descriptor Table creation
     align 8
@@ -414,6 +449,10 @@ section .data
         dq 0x008FF2000000FFFF ; Entry 4: The user data segment ; 0x20
 
         ; and there we have our GDT described.
+        ; actually, we will need two more slots, for the TSS descriptor to be attached to the GDT.
+        ; so we reserve them:
+        dq 0 ; Lower 64 bits of the TSS descriptor. Offset at gdt: 0x28
+        dq 0 ; Upper 64 bits of the TSS descriptor. Offset at gdt: 0x30
 
     gdt_end:
 
@@ -801,22 +840,22 @@ sys_plot_pixel:
     ; needs all three channels to be set to min simultaneously
 
     ; shift 0x00 by the low byte of the green mask shift of the framebuffer
-;    mov rcx, [framebuffer_struct_red_mask_shift]
-;    mov rdx, 0x00
-;    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
-;    mov rax, rdx ; rax is free to use internally
+    ;    mov rcx, [framebuffer_struct_red_mask_shift]
+    ;    mov rdx, 0x00
+    ;    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
+    ;    mov rax, rdx ; rax is free to use internally
 
     ; shift 0x00 by the low byte of the green mask shift of the framebuffer
-;    mov rcx, [framebuffer_struct_green_mask_shift]
-;    mov rdx, 0x00
-;    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
-;    or rax, rdx ; bitwise OR, 1 OR 1 = 1
+    ;    mov rcx, [framebuffer_struct_green_mask_shift]
+    ;    mov rdx, 0x00
+    ;    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
+    ;    or rax, rdx ; bitwise OR, 1 OR 1 = 1
 
-    ; shift 0x00 by the low byte of the green mask shift of the framebuffer
-;    mov rcx, [framebuffer_struct_blue_mask_shift]
-;    mov rdx, 0x00
-;    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
-;    or rax, rdx ; bitwise OR, 1 OR 1 = 1
+        ; shift 0x00 by the low byte of the green mask shift of the framebuffer
+    ;    mov rcx, [framebuffer_struct_blue_mask_shift]
+    ;    mov rdx, 0x00
+    ;    shl rdx, cl ; cl holds the low 8 bits of rcx (the green mask shift range), and this is an x86 design choice. Weird.
+    ;    or rax, rdx ; bitwise OR, 1 OR 1 = 1
 
     ; the above stuff works, and is mathematically valid, but computationally redundant
     ; still I am keep that block as commments
@@ -1784,6 +1823,209 @@ setup_legacy_hardware:
 
     ret
 
+setup_tss_descriptor:
+
+    ; construction of the TSS descriptor
+    ;
+    ; The TSS descriptor is a 128-bit descriptor where each bit region has it's own designation
+    ;
+    ;
+    ;
+    ;   TSS DESCRIPTOR -- 128 bits
+    ;
+    ;    127                                      96
+    ;    ┌----------------------------------------┐
+    ;    │              RESERVED = 0              │
+    ;    └----------------------------------------┘
+    ;
+    ;    63       56 55 54 53 52 51    48 47 46 45 44 43    40 39       32 31     24 23    16 15        0
+    ;    ┌----------┬-┬-┬-┬---┬----------┬-┬----┬----┬--------┬----------┬----------┬----------┬------------┐
+    ;    |BASE31:24 |G│D│L│AVL│LIM19:16  │P│DPL │ S  │ TYPE   │BASE23:16 │BASE15:8  │BASE7:0   │ LIMIT15:0  │
+    ;    └----------┴-┴-┴-┴---┴----------┴-┴----┴----┴--------┴----------┴----------┴----------┴------------┘
+    ;
+    ;   Notice how the flags are similar to that of the GDT.
+    ;
+    ;   But this time some of the flags have different implications than in the case of GDT.
+    ;
+    ;   Type = 1001 ; 64-bit available TSS
+    ;   Type = 1011 ; 64-bit busy TSS
+    ;
+    ;   We will initialize the Type bits as 1001 by default.
+    ;
+    ;   These 4 bits are automatically set by the CPU as per the availablility of the TSS.
+    ;
+    ;   S bit, same as GDT.
+    ;   S = 0 --> system descriptor
+    ;   S = 1 --> code/data descriptor
+    ;
+    ;   Since this is not a code segment, thus S = 0.
+    ;
+    ;   DPL --> Descriptor privilege bits, same as GDT
+    ;   DPL = 00, ring 0, DPL = 11, ring 3, that's all we need for now.
+    ;   DPL will be 00 here.
+    ;
+    ;   P, present bit --> denotes if the descriptor is present or not, if set to 0 then attempting to load the
+    ;   descrptor with ltr will fault.
+    ;   P will be 1 here.
+    ;
+    ;   G, granularity, set to 0 here since the TSS is only 104 bytes.
+    ;
+    ;   L, denotes if the descriptor is in 64-bit long mode, but since the TSS descriptor is not a code segment,
+    ;   L = 0
+    ;
+    ;   D = 0, same story as L for the TSS descriptor.
+    ;
+    ;   AVL, availablility for software use, CPU doesn't need this, so we set it to 0.
+    ;
+    ;   so leaving out the base bits, which would the address of tss64, we have the limit bits as TSS_LIMIT.
+    ;
+    ;   and remaining bits 127 to 96 are reserved, thus set to 0.
+
+    ; phase 1, we calculate tss64's address and split it's base bits accordingly for our descriptor
+    ; The base bits are split across as follows:
+    ;
+    ; Let B = address of tss64
+    ;
+    ; | Descriptor bits | Base bits placed there |   Width |
+    ; | --------------: | ---------------------: | ------: |
+    ; |         23:16 |               B[7:0]     |  8 bits |
+    ; |         31:24 |              B[15:8]     |  8 bits |
+    ; |         39:32 |             B[23:16]     |  8 bits |
+    ; |         63:56 |             B[31:24]     |  8 bits |
+    ; |         95:64 |             B[63:32]     | 32 bits |
+
+    ; rax has no need of holding the previous value at this point,
+
+    lea rax, [rel tss64]
+    movzx ebx, al ; store descriptor bits 23 to 16, while also zero extending them
+
+    shr rax, 8 ; get these bits out of al now, since we don't neeed them.
+    ; repeat again
+    movzx ecx, al ; store descriptor bits 31 to 24, while also zero extending them
+
+    shr rax, 8 ; get these bits out of al again.
+    ; repeat again
+    movzx edx, al ; store descriptor bits 39 to 32, while also zero extending them
+
+    shr rax, 8 ; get these bits out of al again, while also zero extending them
+    ; repeat again.
+    movzx edi, al ; store descriptor bits 63 to 56, while also zero extending them
+
+    shr rax, 8 ; get these bits out of al again.
+
+    ; now eax should be holding the remaining 32-bit value of descriptor bits  95 to 64
+    ; and we have all the base bits in 32-bit format, good.
+    ; but we need to put these base bits in their correct order.
+    ; for base bits 23 to 16,
+    ; initially say:
+    ; RBX = 00000000 00000000 00000000 10001000 (imaginary value, we are not sure if it's really 10001000, it's being used as an example)
+    ;                                  B[7:0]
+    ; We need that byte to occupy bits 23:16.
+    ; So:
+    shl rbx, 16
+    ; produces:
+    ; RBX = 00000000 00000000 10001000 00000000
+    ;                         ↑
+    ;                       23:16
+    ; The lower 16 bits became zero.
+
+    ; now similarly:
+
+    shl rcx, 24 ; lower 24 bits become zero in rcx
+    shl rdx, 32 ; lower 32 bits become zero in rdx
+    shl rdi, 56 ; lower 56 bits become zero in rdi
+
+    ; now as for the remaining base bits 63 to 32 in rax, we have a 32-bit value sitting in eax, so the upper half of rax is 0.
+    ; but the descriptor's upper half wants this at 95:64.
+    ; so no shifting here is required as this will become the descriptor's second 64-bit half.
+    ; so we can just zero extend the value in rax so that it's upper 32-bit half is all zero.
+    mov eax, eax
+    ; now this is a query-able 64-bit value in rax which will form the lower 64-bit half of the total 128-bit TSS descriptor value.
+
+    ; lastly, the limit
+    ; this would be the address of the TSS_LIMIT from the tss.inc,
+    ; and we have to compute and shift these to fit them in the same way.
+    ; we have, bits 15 to 0 , that's 16 bits
+    ; and bits 51 to 48 for the limit, that's 4 bits,
+    ; 24 bits total, so we can store the value inside a 32-bit register.
+    mov esi, TSS_LIMIT ; esi holds the value of the TSS_LIMIT.
+    ; the lower 16 bits are exactly where we want them, no shift required for those.
+    ; but we need to extract the upper 4 bits since those are needed in descriptor bits 51 to 48.
+    ; so we can do this:
+    mov r8d, esi ; r8d is the 32-bit portion register of the 64-bit r8 register
+    shr r8d, 16 ; shift the lower 16 bits out.
+    ; now we just need the 4 bits sitting at the very bottom of r8d, inside r8b.
+    ; a not-so-clever-but-easy-to-understandable-way to proceed forward would be this:
+    ; we shift the 4 bits we actually need to the upper half of r8b.
+    shl r8b, 4
+    ; now they are at the top of r8b.
+    ; we can now take this same concept and move them up all the way so that they start from bit 48 and extend out to bit 51
+    ; since we already shifted 4 bits out, all we need is the remaining 44 bits to be shifted.
+    ; this shift operation will directly act on r8.
+    shl r8, 44
+    ; and now we have the remaining 4 limit bits exactly where we need them.
+
+    ; now we construct the rest of the bits.
+    ; bits 47 to 40:
+    ; P DPL S TYPE
+    ; 1 00  0 1001
+    ; 10001001 --> 89 --> 0x89
+    mov r9, 0x89
+    ; shifting 0x89 all the way up so that they start at bit 40 and extend up to bit 47
+    shl r9, 40
+
+    ; bits 55, 54, 53, 52
+    ; G, D, L, AVL
+    ; 0, 0, 0, 0 (as discussed earlier)
+    ; 0000 --> 0x0
+
+    ; this would look something like:
+    ; mov r10, 0x0
+    ; shl r10, 52
+    ; but then the register would be wasted since r10 is already zero at all bit places.
+
+    ; bits 127 to 96, reserved, all zero.
+    ; 00000000 00000000 00000000 00000000
+    ; 0x0000000
+    ; now what could be done for this?
+    ; Well,
+    ; since rax already contains:
+    ;
+    ;   descriptor bits 95:64  --> TSS base bits B[63:32]
+    ;   descriptor bits 127:96 --> reserved = 0
+    ;
+    ; Therefore rax is already the complete upper 64-bit descriptor word.
+    ; so, there's nothing further to be done here except to combine the remaining values to form the complete lower 64 bits of the TSS descriptor
+    ; since rsi already has the TSS_LIMIT at the perfect range, we will be OR-ing everything else into rsi.
+
+    or rsi, rbx
+    or rsi, rcx
+    or rsi, rdx
+    or rsi, rdi
+    or rsi, r8
+    or rsi, r9
+
+    ; so our entire tss descriptor is stored in two registers now.
+    ; rax --> upper 64 bits of the TSS descriptor
+    ; rsi --> lower 64 bits of the TSS descriptor.
+    ; now we move these into our gdt's defined fields at the specific offsets
+
+    mov qword [rel gdt + 0x28], rsi
+    mov qword [rel gdt + 0x30], rax
+
+    mov ax, TSS_SELECTOR ; since ltr doesn't take an immediate offset constant, so we need 16-bit register/memory operand containing a selector.
+    ltr ax ; tells the CPU to take 0x28, and then to interpret it as a selector for the task register, hence ltr.
+    ; we need not load 0x30 since the CPU will already use this selector and access the upper 64-bit half of the TSS descriptor at 0x30
+
+    ret
+
+setup_kernel_stack:
+    ; initialize the kernel stack pointer for CPU0
+    lea rax, [rel kernel_stack0_top] ; load the address of the variable of kernel_stack0_top
+    mov qword [rel tss64 + TSS_RSP0], rax ; store the address of tss64.rsp0 inside kernel_stack0_top
+
+    ret
+
 setup_hardware:
     ; one-time hardware components setup.
 
@@ -1864,6 +2106,13 @@ _start:
     ; technically redundant since it's already defined in .data
     ; but I will keep the explicit initialization nonetheless.
     mov qword [rel timer_ticks], 0
+
+    call setup_kernel_stack
+
+    ; initialize the iomap_base
+    mov word [rel tss64 + TSS_IOMAP_BASE], TSS_SIZE ; the iomap base's offset points beyond the end of the tss.
+
+    call setup_tss_descriptor
 
     sti ; set the interrupt flag
     ; now execution will happen in Orion's GDT, in ring 0.

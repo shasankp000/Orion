@@ -9,3 +9,4 @@ orion_gdt_reference.md
 *.elf
 *.iso
 *.o
+*.lst
