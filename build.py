@@ -9,13 +9,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
-SOURCE = ROOT / "orion_v0.1.1.asm"
-OBJECT = ROOT / "orion_v0.1.1.o"
-ELF = ROOT / "orion_v0.1.1.elf"
+ORION_VERSION = "v0.1.1"
+
+SOURCE = ROOT / ("orion_" + ORION_VERSION + ".asm")
+OBJECT = ROOT / ("orion_" + ORION_VERSION + ".0")
+ELF = ROOT / ("orion_" + ORION_VERSION + ".elf")
 LINKER = ROOT / "linker.ld"
 
 ISO_ROOT = ROOT / "iso_root"
-ISO = ROOT / "orion_v0.1.1.iso"
+ISO = ROOT / ("orion_" + ORION_VERSION + ".iso")
 
 LIMINE_DATA = Path("/usr/share/limine")
 
@@ -72,7 +74,7 @@ def main():
 
     shutil.copy2(
         ELF,
-        ISO_ROOT / "boot" / "orion_v0.1.elf"
+        ISO_ROOT / "boot" / ("orion_" + ORION_VERSION + ".elf")
     )
 
 
