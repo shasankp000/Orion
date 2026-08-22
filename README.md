@@ -38,6 +38,7 @@ Current milestones include:
 -   Interrupts enabled with `sti`
 -   An Orion-owned 64-bit TSS (Task State Segment), loaded via `ltr`
 -   A dedicated Ring 0 kernel stack (`RSP0`) wired into the TSS
+-   Two working, verified CPU exception handlers (`#DE`, `#BP`)
 -   A complete boot path from Limine entry through Orion's kernel setup
     and `kernel_main`
 
@@ -49,14 +50,15 @@ The current kernel can:
 4.  Configure the PIT and PIC.
 5.  Construct and load Orion's IDT.
 6.  Construct and load Orion's TSS, including a dedicated Ring 0 stack.
-7.  Enable interrupts.
-8.  Receive timer IRQ0 interrupts.
-9.  Increment a kernel-owned timer counter.
-10. Use that counter to implement a blocking delay syscall.
-11. Query the framebuffer and render text.
-12. Clear the framebuffer.
-13. Continue executing after the delay and render another message.
-14. Halt cleanly through `sys_exit`.
+7.  Install CPU exception gates for `#DE` and `#BP`.
+8.  Enable interrupts.
+9.  Receive timer IRQ0 interrupts.
+10. Increment a kernel-owned timer counter.
+11. Use that counter to implement a blocking delay syscall.
+12. Query the framebuffer and render text.
+13. Clear the framebuffer.
+14. Continue executing after the delay and render another message.
+15. Halt cleanly through `sys_exit`.
 
 The current source is intentionally heavily commented. The comments are
 part of the learning process and document the reasoning behind the
@@ -316,7 +318,7 @@ Orion uses it for two purposes:
 -   Providing `RSP0`, the stack pointer the CPU loads automatically on a
     Ring 3 → Ring 0 transition (prepared now even though Ring 3 is not
     yet active).
--   Providing IST (Interrupt Stack Table) entries — dedicated stacks for
+-   Providing IST (Interrupt Stack Table) entries -- dedicated stacks for
     specific interrupts/exceptions, independent of whatever stack was in
     use when the interrupt occurred. IST stacks are not yet wired to any
     interrupt vector.
@@ -374,7 +376,7 @@ TSS state before it was valid.
 allocator yet.
 
 `iomap_base` is set at runtime to `TSS_SIZE` (`0x68`), which tells the
-CPU the I/O permission bitmap starts beyond the end of the TSS — i.e.
+CPU the I/O permission bitmap starts beyond the end of the TSS -- i.e.
 there is currently no I/O bitmap. This is computed from `TSS_SIZE`
 rather than hardcoded, so it stays correct if the struct layout ever
 changes.
@@ -387,6 +389,132 @@ changes.
 -   `IST1` and a routed double-fault (`#DF`, vector 8) IDT gate: not
     yet implemented. IST is therefore defined but not yet exercised by
     an actual interrupt.
+
+------------------------------------------------------------------------
+
+# CPU Exceptions
+
+Orion is incrementally building out real CPU exception handling, one
+vector at a time, rather than implementing the full exception table at
+once. Each handler is written, wired into the IDT, and deliberately
+triggered/verified in GDB before moving to the next.
+
+## Supported exceptions
+
+| Vector | Exception | Gate type | IST | Status |
+|---:|---|---|---|---|
+| 0 | `#DE` -- Divide error | Interrupt gate (`0x8E`) | 0 | Implemented and verified |
+| 3 | `#BP` -- Breakpoint | Trap gate (`0x8F`) | 0 | Implemented and verified |
+| 1 | `#DB` -- Debug | -- | -- | Not yet implemented |
+| 6 | `#UD` -- Invalid opcode | -- | -- | Not yet implemented |
+| 13 | `#GP` -- General protection fault | -- | -- | Not yet implemented |
+| 14 | `#PF` -- Page fault | -- | -- | Not yet implemented |
+| 8 | `#DF` -- Double fault | -- | 1 (planned) | Not yet implemented |
+
+## `#DE` -- Divide error
+
+`#DE` has no CPU-pushed error code and is treated as fatal: the handler
+does not attempt to resume execution, since there is no meaningful way
+to continue after a divide error.
+
+``` asm
+.divide_by_zero_exception_handler:
+    cli
+    hlt
+```
+
+The gate uses an interrupt gate (`0x8E`), consistent with the timer
+gate, and does not use an IST stack -- the currently active kernel stack
+is trusted, since `#DE` is a normal synchronous exception rather than a
+sign of stack corruption.
+
+## `#BP` -- Breakpoint
+
+`#BP` is triggered by the single-byte `int3` instruction, and is also
+the mechanism GDB uses internally for software breakpoints (it
+temporarily overwrites an instruction's first byte with `0xCC`). Unlike
+`#DE`, `#BP` is meant to be recoverable -- execution resumes normally
+after the handler returns via `iretq`.
+
+``` asm
+.breakpoint_exception_handler:
+    iretq
+```
+
+`#BP` deliberately uses a trap gate (`0x8F`) rather than an interrupt
+gate. This was discovered during testing: an early version of the
+handler exercised `sys_delay`, which depends on the timer interrupt to
+advance `timer_ticks`. With an interrupt gate, `IF` is cleared on entry
+and the timer cannot fire, so the delay never completed and the
+breakpoint handler hung permanently. Switching to a trap gate keeps
+`IF` set through the handler, allowing other interrupts -- including the
+timer -- to continue firing. The trap gate is being kept even after the
+delay/print testing code was stripped out of the final handler, since a
+debugger-triggered breakpoint may occur while other kernel activity is
+in flight.
+
+This was verified end-to-end in QEMU: an `int3` placed in `kernel_main`
+correctly printed a test message, survived a multi-second delay (proving
+the timer kept ticking through the handler), and resumed normal
+execution afterward via `iretq`.
+
+## Register preservation
+
+Since an exception can occur at any point in normal execution, any
+handler that touches registers beyond what it needs is responsible for
+saving and restoring them around its body:
+
+``` asm
+push rax
+push rbx
+push rcx
+push rdx
+push rdi
+push rsi
+
+; handler body
+
+pop rsi
+pop rdi
+pop rdx
+pop rcx
+pop rbx
+pop rax
+```
+
+Pops must exactly mirror pushes in reverse order -- a mismatched
+push/pop order silently corrupts every register's restored value
+without producing a crash or assembler warning, making it a
+particularly easy class of bug to miss.
+
+## Gate installation
+
+Each exception currently has its own dedicated setup subroutine (e.g.
+`setup_IDT_DE_GATE`, `setup_IDT_BP_GATE`), called in sequence from
+`setup_IDT`, rather than one large subroutine handling every gate
+inline. This keeps `setup_IDT` itself readable as a short list of calls,
+and keeps each gate's construction independently reviewable:
+
+``` asm
+setup_IDT:
+    call setup_IDT_TIMER_GATE
+    call setup_IDT_DE_GATE
+    call setup_IDT_BP_GATE
+
+    lidt [idt_descriptor]
+    ret
+```
+
+The gate-construction logic (splitting the handler address across the
+gate's offset fields, encoding the segment selector and attributes
+byte, and writing the two 64-bit halves into the correct IDT slot) is
+currently duplicated per gate rather than factored into a shared
+helper. This is a deliberate, temporary choice while each exception's
+specific requirements (error codes, IST usage) are still being learned
+one at a time; factoring into a shared `install_idt_gate`-style helper
+is expected once the remaining exceptions -- particularly `#GP`, the
+first to introduce a CPU-pushed error code -- clarify what a general
+interface actually needs to support.
 
 ------------------------------------------------------------------------
 
@@ -612,8 +740,11 @@ setup_hardware
   │
   ├── configure PIT
   ├── configure PIC
-  ├── construct timer IDT entry
-  └── load IDT
+  └── setup_IDT
+        ├── construct timer gate
+        ├── construct #DE gate
+        ├── construct #BP gate
+        └── lidt
   │
   V
 initialize timer_ticks
@@ -710,6 +841,9 @@ Examples of things currently verified through GDB include:
 -   framebuffer memory contents
 -   Task Register (`TR`) contents after `ltr`
 -   TSS `RSP0` and `iomap_base` field values after initialization
+-   `#DE` and `#BP` IDT gate bytes at their respective slots
+-   Control transfer into `#DE`/`#BP` handlers and correct resumption
+    (or halt) afterward
 
 The timer subsystem was specifically debugged by placing a breakpoint
 directly on:
@@ -746,6 +880,8 @@ The roadmap is deliberately evolutionary rather than a rigid checklist.
 
 Broad areas ahead include:
 
+-   Implement remaining CPU exception handlers: `#DB`, `#UD`, `#GP`,
+    `#PF`, and `#DF`.
 -   Wire an IST1 stack to a routed double-fault (`#DF`, vector 8) IDT
     gate, completing the IST half of the TSS work.
 -   Expand hardware abstraction.
